@@ -1,0 +1,357 @@
+[
+    {
+    "dns": {
+      "queryStrategy": "UseIPv4",
+      "hosts": {
+        "geosite:google": "www.google.com"
+      },
+      "servers": [
+        "217.218.127.127"
+      ]
+    },
+    "inbounds": [
+      {
+        "listen": "127.0.0.1",
+        "port": 10808,
+        "protocol": "socks",
+        "settings": {
+          "auth": "noauth",
+          "udp": true,
+          "userLevel": 8
+        },
+        "sniffing": {
+          "destOverride": [
+            "http",
+            "tls"
+          ],
+          "enabled": true
+        },
+        "tag": "socks"
+      },
+      {
+        "listen": "127.0.0.1",
+        "port": 10809,
+        "protocol": "http",
+        "settings": {
+          "userLevel": 8
+        },
+        "tag": "http"
+      },
+      {
+        "port": 10853,
+        "protocol": "dokodemo-door",
+        "settings": {
+          "address": "217.218.127.127",
+          "network": "tcp,udp",
+          "port": 53
+        },
+        "tag": "dns-in"
+      }
+    ],
+    "log": {
+      "loglevel": "none"
+    },
+    "outbounds": [
+      {
+        "protocol": "freedom",
+        "settings": {
+          "domainStrategy": "UseIPv4"
+        },
+        "tag": "direct"
+      },
+      {
+        "protocol": "dns",
+        "tag": "dns-out"
+      },
+      {
+        "protocol": "blackhole",
+        "settings": {
+          "response": {
+            "type": "http"
+          }
+        },
+        "tag": "block"
+      },
+      {
+        "protocol": "socks",
+        "tag": "dummy",
+        "settings": {
+          "servers": [
+            {
+              "address": "127.0.0.1",
+              "port": 10808
+            }
+          ]
+        }
+      }
+    ],
+    "remarks": "Kurdeus@Github Google Services 1",
+    "routing": {
+      "domainStrategy": "IPIfNonMatch",
+      "rules": [
+        {
+          "inboundTag": [
+            "dns-in"
+          ],
+          "outboundTag": "dns-out",
+          "type": "field"
+        },
+        {
+          "inboundTag": [
+            "socks-in"
+          ],
+          "port": 53,
+          "outboundTag": "dns-out",
+          "type": "field"
+        },
+        {
+          "ip": [
+            "10.10.34.34",
+            "10.10.34.35",
+            "10.10.34.36"
+          ],
+          "outboundTag": "block",
+          "type": "field"
+        }
+      ]
+    }
+},
+  
+{
+      "dns": {
+          "hosts": {
+              "cloudflare-dns.com": [
+                  "216.239.38.120"
+              ],
+              "domain:com": [
+                  "216.239.38.120"
+              ],
+              "domain:ir": [
+                  "216.239.38.120"
+              ],
+              "domain:org": [
+                  "216.239.38.120"
+              ]
+          },
+          "servers": [
+              "https://cloudflare-dns.com/dns-query"
+          ],
+          "tag": "dns"
+      },
+      "inbounds": [
+          {
+              "domainOverride": [
+                  "http",
+                  "tls"
+              ],
+              "listen": "127.0.0.1",
+              "port": 10808,
+              "protocol": "socks",
+              "settings": {
+                  "auth": "noauth",
+                  "udp": true,
+                  "userLevel": 8
+              },
+              "sniffing": {
+                  "destOverride": [
+                      "http",
+                      "tls"
+                  ],
+                  "enabled": true,
+                  "metadataOnly": true
+              },
+              "tag": "socks-in"
+          },
+          {
+              "listen": "127.0.0.1",
+              "port": 10809,
+              "protocol": "http",
+              "settings": {
+                  "userLevel": 8
+              },
+              "sniffing": {
+                  "destOverride": [
+                      "http",
+                      "tls"
+                  ],
+                  "enabled": true,
+                  "metadataOnly": true
+              },
+              "tag": "http-in"
+          }
+      ],
+      "log": {
+          "access": "",
+          "dnsLog": false,
+          "error": "",
+          "loglevel": "none"
+      },
+      "meta": null,
+      "outbounds": [
+          {
+              "domainStrategy": "UseIP",
+              "protocol": "freedom",
+              "settings": {
+                  "fragment": {
+                      "interval": "10-20",
+                      "length": "10-20",
+                      "packets": "tlshello"
+                  }
+              },
+              "sniffing": {
+                  "destOverride": [
+                      "http",
+                      "tls"
+                  ],
+                  "enabled": true,
+                  "metadataOnly": true
+              },
+              "streamSettings": {
+                  "sockopt": {
+                      "domainStrategy": "UseIP",
+                      "mark": 255,
+                      "tcpKeepAliveIdle": 100,
+                      "tcpNoDelay": true
+                  }
+              },
+              "tag": "fragment-out"
+          },
+          {
+              "protocol": "dns",
+              "tag": "dns-out"
+          },
+          {
+              "domainStrategy": "",
+              "mux": {
+                  "concurrency": 8,
+                  "enabled": false
+              },
+              "protocol": "vless",
+              "settings": {
+                  "vnext": [
+                      {
+                          "address": "google.com",
+                          "port": 443,
+                          "users": [
+                              {
+                                  "encryption": "none",
+                                  "flow": "",
+                                  "id": "UUID",
+                                  "level": 8,
+                                  "security": "auto"
+                              }
+                          ]
+                      }
+                  ]
+              },
+              "streamSettings": {
+                  "network": "ws",
+                  "security": "tls",
+                  "tlsSettings": {
+                      "allowInsecure": false,
+                      "alpn": [
+                          "h2",
+                          "http/1.1"
+                      ],
+                      "fingerprint": "randomized",
+                      "publicKey": "",
+                      "serverName": "google.com",
+                      "shortId": "",
+                      "show": false,
+                      "spiderX": ""
+                  },
+                  "wsSettings": {
+                      "headers": {
+                          "Host": "google.com"
+                      },
+                      "path": "/"
+                  }
+              },
+              "tag": "fakeproxy-out"
+          },
+          {
+              "protocol": "freedom",
+              "settings": {
+                  "domainStrategy": "UseIP"
+              },
+              "tag": "direct"
+          }
+      ],
+      "policy": {
+          "levels": {
+              "8": {
+                  "connIdle": 300,
+                  "downlinkOnly": 1,
+                  "handshake": 4,
+                  "uplinkOnly": 1
+              }
+          },
+          "system": {
+              "statsOutboundDownlink": true,
+              "statsOutboundUplink": true
+          }
+      },
+      "remarks": "Kurdeus@Github Google Services 2",
+      "routing": {
+          "domainStrategy": "UseIP",
+          "rules": [
+              {
+                  "ip": [
+                      "geoip:private"
+                  ],
+                  "outboundTag": "direct",
+                  "type": "field"
+              },
+              {
+                  "domain": [
+                      "geosite:private"
+                  ],
+                  "outboundTag": "direct",
+                  "type": "field"
+              },
+              {
+                  "domain": [
+                      "geosite:telegram"
+                  ],
+                  "outboundTag": "fakeproxy-out",
+                  "type": "field"
+              },
+              {
+                  "ip": [
+                      "geoip:ir"
+                  ],
+                  "outboundTag": "direct",
+                  "type": "field"
+              },
+              {
+                  "inboundTag": [
+                      "domestic-dns"
+                  ],
+                  "outboundTag": "direct",
+                  "type": "field"
+              },
+              {
+                  "enabled": true,
+                  "inboundTag": [
+                      "socks-in",
+                      "http-in"
+                  ],
+                  "outboundTag": "dns-out",
+                  "port": "53",
+                  "type": "field"
+              },
+              {
+                  "enabled": true,
+                  "inboundTag": [
+                      "socks-in",
+                      "http-in"
+                  ],
+                  "network": "tcp",
+                  "outboundTag": "fragment-out",
+                  "type": "field"
+              }
+          ],
+          "strategy": "rules"
+      },
+      "stats": {}
+}]

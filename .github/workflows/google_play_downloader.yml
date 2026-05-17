@@ -1,0 +1,211 @@
+name: دانلود فایل نصبی گوگل پلی
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'Package name (e.g., com.google.android.youtube)'
+        required: true
+        type: string
+      architecture:
+        description: 'Target architecture'
+        required: true
+        type: choice
+        default: 'arm64'
+        options:
+          - arm64
+          - armv7
+      merge_splits:
+        description: 'Merge split APKs into single installable APK'
+        required: false
+        type: boolean
+        default: true
+      output_folder:
+        description: 'Output folder (relative to repo root)'
+        required: false
+        type: string
+        default: 'downloads'
+
+      upload_method:
+        description: 'Upload method: repository (push to repo), release (GitHub Releases), or temp_branch'
+        required: false
+        type: choice
+        options:
+          - repository
+          - release
+          - temp_branch
+        default: 'repository'
+
+      release_tag:
+        description: 'Release tag name (only used when upload_method = release)'
+        required: false
+        type: string
+        default: ''
+
+      branch_name:
+        description: 'Temporary branch name (internal use only)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  download-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Create or checkout temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
+          git checkout -b "${{ github.event.inputs.branch_name }}"
+          git push -u origin "${{ github.event.inputs.branch_name }}"
+
+      - name: Create output folder
+        run: mkdir -p "${{ inputs.output_folder }}"
+
+      - name: Cache & install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: openjdk-17-jre-headless apksigner python3 python3-venv python3-pip curl git
+          version: '1.0'
+
+      - name: Clone gplay-apk-downloader
+        run: |
+          git clone https://github.com/alltechdev/gplay-apk-downloader.git
+          cd gplay-apk-downloader
+          ./setup.sh
+
+      - name: Authenticate with Google Play
+        run: |
+          cd gplay-apk-downloader
+          echo "y" | ./gplay auth
+          echo "Authentication completed."
+
+      - name: Download APK
+        id: download
+        run: |
+          cd gplay-apk-downloader
+          ARCH="${{ inputs.architecture }}"
+          MERGE="${{ inputs.merge_splits }}"
+          OUTPUT_DIR="../${{ inputs.output_folder }}"
+          
+          CMD="./gplay download ${{ inputs.package_name }} -a $ARCH -o $OUTPUT_DIR"
+          if [ "$MERGE" = "true" ]; then
+            CMD="$CMD -m"
+          fi
+          
+          echo "Running: $CMD"
+          $CMD
+          
+          # Find downloaded file(s)
+          cd "$OUTPUT_DIR"
+          if [ "$MERGE" = "true" ]; then
+            DOWNLOADED_FILE=$(ls -1 *.apk 2>/dev/null | head -n1)
+          else
+            DOWNLOADED_FILE=$(ls -1 *.apk *.zip 2>/dev/null | head -n1)
+          fi
+          
+          if [ -z "$DOWNLOADED_FILE" ]; then
+            echo "Error: No file downloaded"
+            exit 1
+          fi
+          
+          echo "downloaded_file_path=$OUTPUT_DIR/$DOWNLOADED_FILE" >> $GITHUB_OUTPUT
+          echo "downloaded_file_name=$DOWNLOADED_FILE" >> $GITHUB_OUTPUT
+
+      - name: Split APK file (repository/temp_branch mode)
+        if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
+        run: |
+          DOWNLOADED_FILE="${{ steps.download.outputs.downloaded_file_path }}"
+          
+          cd "${{ inputs.output_folder }}"
+          BASENAME=$(basename "$DOWNLOADED_FILE")
+          FILE_SIZE=$(stat -c%s "$BASENAME")
+          THRESHOLD_BYTES=$((85 * 1024 * 1024))
+          
+          if [ "$FILE_SIZE" -gt "$THRESHOLD_BYTES" ]; then
+            # Split the APK file into 85 MB chunks (keep .apk extension)
+            echo "Splitting $BASENAME (${FILE_SIZE} bytes) into 85 MB parts..."
+            split -b 85m -d -a 3 "$BASENAME" "${BASENAME}.part_"
+            
+            # Count parts
+            PART_COUNT=$(ls ${BASENAME}.part_* 2>/dev/null | wc -l)
+            echo "Created $PART_COUNT parts"
+            
+            # Delete the original APK
+            rm -f "$BASENAME"
+          else
+            echo "File size (${FILE_SIZE} bytes) is under 85 MB, keeping original"
+          fi
+
+      - name: Prepare files — release mode (no split needed, APK <2 GB)
+        if: github.event.inputs.upload_method == 'release'
+        run: |
+          # For release mode, just keep the APK as-is (GitHub Releases allows up to 2 GB)
+          echo "Release mode: keeping original APK file"
+          DOWNLOADED_FILE="${{ steps.download.outputs.downloaded_file_path }}"
+          # Nothing to split - Releases can handle files up to 2 GB
+
+      - name: Remove original downloaded file(s) if still present
+        run: |
+          DOWNLOADED_FILE="${{ steps.download.outputs.downloaded_file_path }}"
+          if [[ -n "$DOWNLOADED_FILE" && -f "$DOWNLOADED_FILE" ]]; then
+            rm "$DOWNLOADED_FILE"
+          fi
+
+      - name: Commit and push (repository mode)
+        if: github.event.inputs.upload_method == 'repository'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.output_folder }}/"
+          git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
+          for push_attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Commit and push (temp_branch mode)
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.output_folder }}/"
+          git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
+          for push_attempt in 1 2 3; do
+            if git push origin "${{ github.event.inputs.branch_name }}"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Upload to GitHub Releases
+        if: github.event.inputs.upload_method == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('apk-{0}', github.run_number) }}
+          name: "Google Play — ${{ inputs.package_name }}"
+          body: |
+            Google Play APK Download
+
+            Package: ${{ inputs.package_name }}
+            Architecture: ${{ inputs.architecture }}
+            Merged: ${{ inputs.merge_splits }}
+
+            Powered by Meli-Action ⚡
+          files: ${{ inputs.output_folder }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

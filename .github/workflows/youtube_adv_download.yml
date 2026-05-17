@@ -1,0 +1,493 @@
+name: دانلودر یوتیوب پیشرفته
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube URL (video or playlist)'
+        required: true
+        type: string
+
+      output_format:
+        description: 'Output format'
+        required: true
+        type: choice
+        options:
+          - mp4 (video)
+          - mp3 (audio only)
+          - best (auto)
+        default: 'mp4 (video)'
+
+      video_quality:
+        description: 'Max video resolution to download'
+        required: false
+        type: choice
+        options:
+          - '2160 (4K)'
+          - '1080 (Full HD)'
+          - '720 (HD)'
+          - '480'
+          - '360'
+          - '144'
+          - 'best'
+        default: '1080 (Full HD)'
+
+      audio_quality:
+        description: 'Audio bitrate — applies to MP3 downloads'
+        required: false
+        type: choice
+        options:
+          - '320'
+          - '192'
+          - '128'
+          - '64'
+        default: '192'
+
+      video_codec:
+        description: 'Preferred video codec (ignored for audio-only)'
+        required: false
+        type: choice
+        options:
+          - 'any (auto)'
+          - 'h264 (MP4 compatible)'
+          - 'vp9'
+          - 'av1'
+        default: 'any (auto)'
+
+      concurrent_fragments:
+        description: 'Parallel download fragments — more = faster but higher bandwidth'
+        required: false
+        type: choice
+        options:
+          - '4'
+          - '8'
+          - '16'
+          - '1'
+        default: '4'
+
+      sponsorblock:
+        description: 'Skip sponsor / intro / outro segments via SponsorBlock'
+        required: false
+        type: boolean
+        default: false
+
+      embed_chapters:
+        description: 'Embed chapter markers into the output file'
+        required: false
+        type: boolean
+        default: true
+
+      write_description:
+        description: 'Save video description as a .description text file'
+        required: false
+        type: boolean
+        default: false
+
+      write_info_json:
+        description: 'Save video metadata as a .info.json file'
+        required: false
+        type: boolean
+        default: true
+
+      trim_start:
+        description: 'Trim start timestamp (e.g. 0:33 or 1:22:10) — leave empty to skip'
+        required: false
+        type: string
+
+      trim_end:
+        description: 'Trim end timestamp (e.g. 1:22 or 2:00:00) — leave empty to skip'
+        required: false
+        type: string
+
+      playlist_items:
+        description: |
+          Playlist items to download:
+          Leave empty = single video only
+          all = full playlist
+          3-7 = items 3 through 7
+          1,3,5 = specific items
+        required: false
+        type: string
+
+      cookies:
+        description: |
+          Cookie string (Netscape format) to bypass geo/age restrictions.
+          Safer alternative: store as a repo secret named YT_COOKIES — used automatically.
+        required: false
+        type: string
+
+      download_subtitles:
+        description: 'Download subtitle files'
+        required: false
+        type: boolean
+        default: false
+
+      subtitle_langs:
+        description: 'Subtitle languages, comma-separated (e.g. en,fa)'
+        required: false
+        type: string
+        default: 'en'
+
+      embed_metadata:
+        description: 'Embed thumbnail and metadata into the output file'
+        required: false
+        type: boolean
+        default: true
+
+      max_part_mb:
+        description: 'Maximum part size in MB for splitting (0 = no split)'
+        required: false
+        type: number
+        default: 90
+
+      compress:
+        description: 'Compress oversized files before splitting'
+        required: false
+        type: boolean
+        default: false
+
+      output_folder:
+        description: 'Folder to store downloads (relative to repo root)'
+        required: false
+        type: string
+        default: 'downloads'
+
+      extra_args:
+        description: 'Extra yt-dlp arguments (advanced users)'
+        required: false
+        type: string
+
+      upload_method:
+        description: 'Upload method: repository (push to repo), release (GitHub Releases), or temp_branch'
+        required: false
+        type: choice
+        options:
+          - repository
+          - release
+          - temp_branch
+        default: 'repository'
+
+      release_tag:
+        description: 'Release tag name (only used when upload_method = release)'
+        required: false
+        type: string
+        default: ''
+
+      branch_name:
+        description: 'Temporary branch name (internal use only)'
+        required: false
+        type: string
+        default: ''
+
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-store:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-ytdlp
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-bgutil-v1.3.1
+
+      - name: Cache ffmpeg static build
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
+          key: ffmpeg-static-7.1
+
+      - name: Install ffmpeg (static build)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+          sudo cp /tmp/ffmpeg-*-static/ffmpeg /usr/local/bin/
+          sudo cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
+          ffprobe -version | head -1
+
+      - name: Cache & install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: zip nodejs npm curl
+          version: 1.0
+
+      - name: Install tools
+        run: |
+          pip install -q -U "yt-dlp[default]"
+          rm -rf /tmp/bgutil
+          git clone --depth 1 --branch 1.3.1 \
+            https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+            /tmp/bgutil
+          cd /tmp/bgutil/server && npm ci && npx tsc
+
+      - name: Start PO Token provider server
+        run: |
+          node /tmp/bgutil/server/build/main.js &
+          sleep 5
+
+      - name: Create or checkout temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
+          git checkout -b "${{ github.event.inputs.branch_name }}"
+          git push -u origin "${{ github.event.inputs.branch_name }}"
+
+      - name: Download media
+        run: |
+          URL="${{ github.event.inputs.video_url }}"
+          FORMAT_INPUT="${{ github.event.inputs.output_format }}"
+          VIDEO_QUALITY="${{ github.event.inputs.video_quality }}"
+          AUDIO_Q="${{ github.event.inputs.audio_quality }}"
+          CODEC="${{ github.event.inputs.video_codec }}"
+          FRAGMENTS="${{ github.event.inputs.concurrent_fragments }}"
+          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          TRIM_START="${{ github.event.inputs.trim_start }}"
+          TRIM_END="${{ github.event.inputs.trim_end }}"
+          PLAYLIST_ITEMS="${{ github.event.inputs.playlist_items }}"
+          SUBTITLES="${{ github.event.inputs.download_subtitles }}"
+          SUB_LANGS="${{ github.event.inputs.subtitle_langs }}"
+          EMBED_META="${{ github.event.inputs.embed_metadata }}"
+          EMBED_CHAPTERS="${{ github.event.inputs.embed_chapters }}"
+          SPONSORBLOCK="${{ github.event.inputs.sponsorblock }}"
+          WRITE_DESC="${{ github.event.inputs.write_description }}"
+          EXTRA_ARGS="${{ github.event.inputs.extra_args }}"
+
+          mkdir -p "$OUTPUT_FOLDER"
+
+          # Cookie handling: prefer inline input, fallback to YT_COOKIES secret
+          COOKIE_ARGS=""
+          if [ -n "$INPUT_COOKIES" ]; then
+            printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
+            COOKIE_ARGS="--cookies /tmp/cookies.txt"
+            echo "✅ Using inline cookies"
+          elif [ -n "$SECRET_YT_COOKIES" ]; then
+            printf '%s' "$SECRET_YT_COOKIES" > /tmp/cookies.txt
+            COOKIE_ARGS="--cookies /tmp/cookies.txt"
+            echo "✅ Using secret cookies"
+          else
+            echo "⚠️ NO COOKIES PROVIDED"
+          fi
+
+          # Debug: show cookie file size
+          if [ -f /tmp/cookies.txt ]; then
+            echo "Cookie file size: $(wc -c < /tmp/cookies.txt) bytes"
+            echo "Cookie file line count: $(wc -l < /tmp/cookies.txt)"
+          fi
+
+          # Extract numeric height from quality string (e.g. "2160 (4K)" -> "2160")
+          QUALITY_NUM=$(echo "$VIDEO_QUALITY" | grep -o '[0-9]*' | head -1)
+
+          # Codec filter
+          case "$CODEC" in
+            "h264 (MP4 compatible)") CODEC_FILTER="[vcodec^=avc]" ; MERGE_FMT="mp4" ;;
+            "vp9")                   CODEC_FILTER="[vcodec^=vp9]" ; MERGE_FMT="mkv" ;;
+            "av1")                   CODEC_FILTER="[vcodec^=av01]"; MERGE_FMT="mkv" ;;
+            *)                       CODEC_FILTER=""               ; MERGE_FMT="mp4" ;;
+          esac
+
+          # Format / quality selection
+          if [ "$FORMAT_INPUT" = "mp3 (audio only)" ]; then
+            FORMAT_ARGS="-x --audio-format mp3 --audio-quality ${AUDIO_Q}K"
+          elif [ "$VIDEO_QUALITY" = "best" ]; then
+            FORMAT_ARGS="-f bestvideo+bestaudio --merge-output-format mp4"
+          else
+            if [ -n "$CODEC_FILTER" ]; then
+              FORMAT_ARGS="-f bestvideo[height<=${QUALITY_NUM}]${CODEC_FILTER}+bestaudio/bestvideo[height<=${QUALITY_NUM}]+bestaudio/best[height<=${QUALITY_NUM}] --merge-output-format ${MERGE_FMT} -S res:${QUALITY_NUM}"
+            else
+              FORMAT_ARGS="-f bestvideo[height<=${QUALITY_NUM}]+bestaudio/best[height<=${QUALITY_NUM}] --merge-output-format mp4 -S res:${QUALITY_NUM}"
+            fi
+          fi
+
+          # Trim / section
+          SECTION_ARGS=""
+          if [ -n "$TRIM_START" ] && [ -n "$TRIM_END" ]; then
+            SECTION_ARGS="--download-sections *${TRIM_START}-${TRIM_END} --force-keyframes-at-cuts"
+          elif [ -n "$TRIM_START" ]; then
+            SECTION_ARGS="--download-sections *${TRIM_START}-inf --force-keyframes-at-cuts"
+          elif [ -n "$TRIM_END" ]; then
+            SECTION_ARGS="--download-sections *0-${TRIM_END} --force-keyframes-at-cuts"
+          fi
+
+          # Playlist range
+          PLAYLIST_ARGS="--no-playlist"
+          if [ -n "$PLAYLIST_ITEMS" ]; then
+            if [ "$PLAYLIST_ITEMS" = "all" ]; then
+              PLAYLIST_ARGS=""
+            else
+              PLAYLIST_ARGS="--playlist-items $PLAYLIST_ITEMS"
+            fi
+          fi
+
+          # Subtitles
+          SUBTITLE_ARGS=""
+          if [ "$SUBTITLES" = "true" ]; then
+            SUBTITLE_ARGS="--write-subs --write-auto-subs --sub-langs ${SUB_LANGS}"
+          fi
+
+          # Metadata / thumbnail embedding
+          META_ARGS=""
+          if [ "$EMBED_META" = "true" ]; then
+            META_ARGS="--embed-thumbnail --embed-metadata --add-metadata"
+          fi
+
+          # Chapter markers
+          CHAPTER_ARGS=""
+          if [ "$EMBED_CHAPTERS" = "true" ]; then
+            CHAPTER_ARGS="--embed-chapters"
+          fi
+
+          # SponsorBlock
+          SPONSOR_ARGS=""
+          if [ "$SPONSORBLOCK" = "true" ]; then
+            SPONSOR_ARGS="--sponsorblock-remove sponsor,intro,outro,selfpromo,interaction"
+          fi
+
+          # Description file
+          DESC_ARGS=""
+          if [ "$WRITE_DESC" = "true" ]; then
+            DESC_ARGS="--write-description"
+          fi
+
+          # Force PO Token usage
+          export YTDLP_PO_TOKEN_URL="http://localhost:4416"
+          
+          # Verify PO Token server is reachable
+          curl -s http://localhost:4416/ping && echo "✅ PO Token server ready" || echo "❌ PO Token server not responding"
+
+          yt-dlp \
+            --ffmpeg-location /usr/local/bin \
+            --js-runtimes node \
+            --newline \
+            --write-thumbnail \
+            --write-info-json \
+            --extractor-args "youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv" \
+            --concurrent-fragments "${FRAGMENTS}" \
+            $FORMAT_ARGS \
+            $SECTION_ARGS \
+            $SUBTITLE_ARGS \
+            $META_ARGS \
+            $CHAPTER_ARGS \
+            $SPONSOR_ARGS \
+            $DESC_ARGS \
+            $PLAYLIST_ARGS \
+            $COOKIE_ARGS \
+            -o "$OUTPUT_FOLDER/%(title)s [%(id)s].%(ext)s" \
+            $EXTRA_ARGS \
+            "$URL"
+        env:
+          INPUT_COOKIES: ${{ github.event.inputs.cookies }}
+          SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
+
+      - name: Split oversized files (repository/temp_branch mode)
+        if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
+        run: |
+          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          THRESH_MB=${{ github.event.inputs.max_part_mb }}
+          THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
+          COMPRESS="${{ github.event.inputs.compress }}"
+
+          for f in "$OUTPUT_FOLDER"/*; do
+            [ -f "$f" ] || continue
+            fs=$(stat -c%s "$f")
+            fname=$(basename "$f")
+            if [ "$THRESH_BYTES" -gt 0 ] && [ "$fs" -gt "$THRESH_BYTES" ]; then
+              if [ "$COMPRESS" = "true" ]; then
+                zip -j -s "${THRESH_MB}m" "$OUTPUT_FOLDER/${fname}.zip" "$f"
+              else
+                split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT_FOLDER/${fname}."
+              fi
+              rm "$f"
+            fi
+          done
+
+      - name: Split oversized files (release mode — >2 GB)
+        if: github.event.inputs.upload_method == 'release'
+        run: |
+          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          LIMIT_BYTES=$((2 * 1024 * 1024 * 1024))
+
+          for f in "$OUTPUT_FOLDER"/*; do
+            [ -f "$f" ] || continue
+            fs=$(stat -c%s "$f")
+            fname=$(basename "$f")
+            if [ "$fs" -gt "$LIMIT_BYTES" ]; then
+              echo "Splitting $fname ($(( fs / 1024 / 1024 )) MB) into 2 GB parts..."
+              split -b 2048m -d -a 3 "$f" "$OUTPUT_FOLDER/${fname}."
+              rm "$f"
+            fi
+          done
+
+      - name: Push changes to repository
+        if: github.event.inputs.upload_method == 'repository'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ github.event.inputs.output_folder }}/"
+          git commit -m "Download media [skip ci]" || echo "Nothing to commit"
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          for push_attempt in 1 2 3; do
+            git pull --rebase origin "$CURRENT_BRANCH"
+            if git push origin "$CURRENT_BRANCH"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Push changes to temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ github.event.inputs.output_folder }}/"
+          git commit -m "Download media [skip ci]" || echo "Nothing to commit"
+          for push_attempt in 1 2 3; do
+            if git push origin "${{ github.event.inputs.branch_name }}"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Upload to GitHub Releases
+        if: github.event.inputs.upload_method == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-adv-{0}', github.run_number) }}
+          name: "YouTube Download"
+          body: |
+            YouTube Download Complete
+
+            URL: ${{ github.event.inputs.video_url }}
+            Format: ${{ github.event.inputs.output_format }}
+            Quality: ${{ github.event.inputs.video_quality }}
+            Downloaded on: ${{ github.run_id }}
+
+            Powered by Meli-Action ⚡
+          files: ${{ github.event.inputs.output_folder }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

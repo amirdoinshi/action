@@ -1,0 +1,265 @@
+name: "دانلودر لینک مستقیم"
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: "Direct File URL"
+        required: true
+        type: string
+
+      compress:
+        description: "Compress file before splitting?"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+      zip_password:
+        description: "Password for archive (leave empty for no password)"
+        required: false
+        default: ""
+        type: string
+
+      max_part_mb:
+        description: "Maximum size per part (MB)"
+        required: false
+        default: "90"
+        type: string
+
+      upload_method:
+        description: "Upload Method"
+        required: true
+        default: "repository"
+        type: choice
+        options:
+          - repository
+          - release
+          - temp_branch
+
+      release_tag:
+        description: "Release Tag"
+        required: false
+        default: ""
+        type: string
+
+      branch_name:
+        description: "Temporary branch name (internal use only)"
+        required: false
+        default: ""
+        type: string
+
+      output_folder:
+        description: 'Output folder (relative to repo root)'
+        required: false
+        type: string
+        default: 'downloads'
+
+permissions:
+  contents: write
+
+jobs:
+  direct-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Create or checkout temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
+          git checkout -b "${{ github.event.inputs.branch_name }}"
+          git push -u origin "${{ github.event.inputs.branch_name }}"
+
+      - name: Cache & install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: p7zip-full curl
+          version: '1.0'
+
+      - name: Download File
+        id: download
+        shell: bash
+        run: |
+          mkdir -p temp_dl
+
+          FILE_URL="${{ github.event.inputs.file_url }}"
+
+          FILENAME=$(basename "$FILE_URL" | cut -d'?' -f1)
+          FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._() -]/_/g')
+
+          echo "Downloading: $FILENAME"
+
+          curl -L --fail --retry 3 \
+            -o "temp_dl/$FILENAME" \
+            "$FILE_URL"
+
+          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
+          echo "filepath=temp_dl/$FILENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Process File
+        id: process
+        shell: bash
+        run: |
+          FILEPATH="${{ steps.download.outputs.filepath }}"
+          PASS="${{ github.event.inputs.zip_password }}"
+          PART_SIZE_MB="${{ github.event.inputs.max_part_mb }}"
+          UPLOAD_METHOD="${{ github.event.inputs.upload_method }}"
+          COMPRESS="${{ github.event.inputs.compress }}"
+
+          # Get file size in bytes
+          FILE_SIZE=$(stat -c%s "$FILEPATH")
+          
+          # Set size limits based on upload method
+          if [ "$UPLOAD_METHOD" = "repository" ] || [ "$UPLOAD_METHOD" = "temp_branch" ]; then
+            MAX_SIZE_MB=95  # Below 100 MB GitHub limit
+            DEFAULT_PART_MB=90
+            MAX_PART_MB=95
+          else
+            MAX_SIZE_MB=1900  # Below 2 GB GitHub releases limit
+            DEFAULT_PART_MB=1900
+            MAX_PART_MB=1900
+          fi
+
+          # Validate part size
+          if [[ -z "$PART_SIZE_MB" || "$PART_SIZE_MB" -le 0 ]]; then
+            PART_SIZE_MB=$DEFAULT_PART_MB
+            echo "Using default part size: ${PART_SIZE_MB}MB"
+          elif [ "$PART_SIZE_MB" -gt "$MAX_PART_MB" ]; then
+            PART_SIZE_MB=$MAX_PART_MB
+            echo "Part size too large, capped at: ${PART_SIZE_MB}MB"
+          else
+            echo "Using part size: ${PART_SIZE_MB}MB"
+          fi
+
+          MAX_SIZE=$((MAX_SIZE_MB * 1024 * 1024))
+
+          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
+            # File is small enough, upload as-is
+            echo "File size OK for $UPLOAD_METHOD, no splitting needed"
+            echo "needs_split=false" >> "$GITHUB_OUTPUT"
+          else
+            # File is too large, need to split
+            echo "File too large for $UPLOAD_METHOD (${MAX_SIZE_MB}MB limit), splitting into ${PART_SIZE_MB}MB parts"
+
+            BASENAME=$(basename "$FILEPATH")
+
+            cd temp_dl || exit 1
+
+            if [ "$COMPRESS" = "true" ]; then
+              # Use 7z with compression
+              echo "Creating compressed split archive..."
+              
+              if [ -n "$PASS" ]; then
+                7z a -p"$PASS" -mhe=on -mx=3 -v${PART_SIZE_MB}m "${BASENAME}.7z" "$BASENAME"
+              else
+                7z a -mx=3 -v${PART_SIZE_MB}m "${BASENAME}.7z" "$BASENAME"
+              fi
+              
+              # If only one part was created, rename it
+              if [ -f "${BASENAME}.7z.001" ] && [ ! -f "${BASENAME}.7z.002" ]; then
+                mv "${BASENAME}.7z.001" "${BASENAME}.7z"
+              fi
+            else
+              # No compression: use split
+              echo "Splitting raw file (no compression)..."
+              split -b ${PART_SIZE_MB}M -d "$BASENAME" "${BASENAME}_part_"
+              
+              # Count parts
+              PART_COUNT=$(ls ${BASENAME}_part_* | wc -l)
+              echo "Split into $PART_COUNT parts"
+            fi
+
+            # Remove the original large file
+            rm "$BASENAME"
+
+            echo "needs_split=true" >> "$GITHUB_OUTPUT"
+
+            cd ..
+          fi
+
+      - name: Get Current Date
+        id: get_date
+        shell: bash
+        run: |
+          echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> "$GITHUB_OUTPUT"
+
+      - name: Push to Repository
+        if: github.event.inputs.upload_method == 'repository'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p "${{ github.event.inputs.output_folder }}"
+
+          # Move all files from temp_dl (either original or split parts)
+          mv temp_dl/* ${{ github.event.inputs.output_folder }}/ 2>/dev/null || true
+
+          git add ${{ github.event.inputs.output_folder }}/
+
+          git commit -m "Direct Download: ${{ steps.download.outputs.filename }} [skip ci]" || echo "Nothing to commit"
+
+          for push_attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Push changes to temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p "${{ github.event.inputs.output_folder }}"
+
+          # Move all files from temp_dl (either original or split parts)
+          mv temp_dl/* ${{ github.event.inputs.output_folder }}/ 2>/dev/null || true
+
+          git add ${{ github.event.inputs.output_folder }}/
+
+          git commit -m "Direct Download: ${{ steps.download.outputs.filename }} [skip ci]" || echo "Nothing to commit"
+
+          for push_attempt in 1 2 3; do
+            if git push origin "${{ github.event.inputs.branch_name }}"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Upload to GitHub Releases
+        if: github.event.inputs.upload_method == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('direct-{0}', github.run_number) }}
+          name: Direct Download Release
+          body: |
+            Direct download completed.
+
+            File: ${{ steps.download.outputs.filename }}
+            Date: ${{ steps.get_date.outputs.date }}
+            ${{ steps.process.outputs.needs_split == 'true' && 'File was split into multiple parts due to size.' || '' }}
+          files: temp_dl/*
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -rf temp_dl
