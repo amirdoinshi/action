@@ -288,12 +288,15 @@ jobs:
             echo "final_file=$OUTPUT_DIR/$ZIP_FILE" >> "$GITHUB_OUTPUT"
             echo "final_name=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           else
-            # Single APK, nothing to zip
-            SINGLE=$(ls -1 "$OUTPUT_DIR"/*.apk | head -n1)
-            FINAL="$OUTPUT_DIR/${PACKAGE}.apk"
-            mv "$SINGLE" "$FINAL"
-            echo "final_file=$FINAL" >> "$GITHUB_OUTPUT"
-            echo "final_name=${PACKAGE}.apk" >> "$GITHUB_OUTPUT"
+            # Single APK - don't zip, just rename to package name
+            # But don't output final_file here - let the cleanup step handle it
+            # because SAI mode with single APK should just keep the APK
+            cd "$OUTPUT_DIR"
+            SINGLE=$(ls -1 *.apk | head -n1)
+            # Don't rename yet - let cleanup step handle it to avoid deletion issues
+            echo "Single APK detected: $SINGLE"
+            echo "final_file=$OUTPUT_DIR/$SINGLE" >> "$GITHUB_OUTPUT"
+            echo "final_name=$SINGLE" >> "$GITHUB_OUTPUT"
           fi
 
       # Download SAI installer APK so the user has everything they need in one go.
@@ -319,6 +322,29 @@ jobs:
       - name: Clean up raw splits in SAI mode
         if: inputs.sai_mode == true
         run: |
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+          APK_COUNT="${{ steps.download.outputs.apk_count }}"
+          
+          # Only delete split APKs when there are multiple files (they were zipped)
+          # For single APK, keep it (SAI can install single APKs directly)
+          if [ "$APK_COUNT" -gt 1 ]; then
+            # Remove any remaining .apk files that are NOT SAI.apk
+            find "$OUTPUT_DIR" -maxdepth 1 -name "*.apk" ! -name "SAI.apk" -type f -delete
+            echo "Removed split APKs, keeping only ZIP and SAI.apk"
+          else
+            echo "Single APK mode - keeping the APK file"
+            # Ensure the APK has the correct name (not the versioned one)
+            cd "$OUTPUT_DIR"
+            # Rename versioned APK to package name if needed
+            for f in *.apk; do
+              if [ "$f" != "SAI.apk" ]; then
+                mv "$f" "${{ inputs.package_name }}.apk" 2>/dev/null || true
+              fi
+            done
+          fi
+          
+          echo "Files after cleanup:"
+          ls -la "$OUTPUT_DIR/"|
           OUTPUT_DIR="${{ inputs.output_folder }}"
           
           # Remove any remaining .apk files that are NOT SAI.apk
