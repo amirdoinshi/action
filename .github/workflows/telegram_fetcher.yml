@@ -36,8 +36,18 @@ jobs:
         with:
           python-version: '3.10'
           
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-telegram-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-telegram-
+            ${{ runner.os }}-pip-
+            
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
           
       - name: Fetch Telegram messages and media
@@ -65,7 +75,7 @@ jobs:
           # Tehran timezone (UTC+3:30)
           TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
           
-          # Rate limiting - max 2 concurrent requests to t.me
+          # Rate limiting
           MAX_WORKERS = 2
           REQUEST_DELAY = 1.0
           
@@ -74,17 +84,14 @@ jobs:
           MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
           MAX_PHOTOS_PER_MESSAGE = 5
           
-          # Headers
           HEADERS = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           }
           
-          # Create directories
           Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
           media_dir = Path(f"{OUTPUT_DIR}/media")
           media_dir.mkdir(exist_ok=True)
           
-          # Load history
           sent_history = json.loads(HISTORY_JSON) if HISTORY_JSON else {}
           
           # Regex patterns
@@ -93,7 +100,51 @@ jobs:
           RE_TIME = re.compile(r'(\d{1,2}:\d{2})')
           
           # ============================================================================
-          # Helper functions
+          # HTML to Markdown conversion (EXACTLY like tele2matrix)
+          # ============================================================================
+          
+          INLINE_FORMAT = {
+              'b': ('**', '**'),
+              'strong': ('**', '**'),
+              'i': ('*', '*'),
+              'em': ('*', '*'),
+              'code': ('`', '`'),
+          }
+          
+          def process_element(content) -> str:
+              if content.name == 'a':
+                  text = content.get_text(strip=True)
+                  href = content.get('href', '')
+                  return f'[{text}]({href})'
+              if content.name == 'br':
+                  return '  \n'
+              if content.name == 'pre':
+                  code = content.get_text(separator='\n', strip=True)
+                  return f'```\n{code}\n```'
+              if content.name in INLINE_FORMAT:
+                  open_md, close_md = INLINE_FORMAT[content.name]
+                  return f'{open_md}{content.get_text(strip=True)}{close_md}'
+              if content.name == 'i' and 'emoji' in (content.get('class') or []):
+                  return content.get_text(strip=True)
+              if content.name == 'blockquote':
+                  parts = [process_element(child) for child in content.children]
+                  inner = ''.join(parts)
+                  lines = inner.split('  \n')
+                  quoted = '\n'.join(f'> {line}' if line.strip() else '>' for line in lines)
+                  return '\n' + quoted + '\n'
+              if content.string:
+                  return content.string.strip()
+              return ''
+          
+          def html_to_markdown(html_content: str) -> str:
+              if not html_content:
+                  return ''
+              soup = BeautifulSoup(html_content, 'html.parser')
+              parts = [process_element(child) for child in soup.children]
+              return ''.join(parts)
+          
+          # ============================================================================
+          # Extraction functions
           # ============================================================================
           
           def extract_message_id(wrap) -> str | None:
@@ -114,7 +165,6 @@ jobs:
                       dt = datetime.fromisoformat(time_el['datetime'].replace('Z', '+00:00'))
                       tehran_dt = dt.astimezone(timezone.utc) + TEHRAN_TZ
                       return tehran_dt.strftime('%H:%M')
-                  
                   footer = bubble.find('div', class_='tgme_widget_message_footer')
                   if footer:
                       m = RE_TIME.search(footer.get_text())
@@ -124,39 +174,45 @@ jobs:
                   pass
               return None
           
-          def extract_text(bubble) -> str:
-              # Strip reactions and footer
+          def extract_html_content(bubble) -> str:
               for cls in ('tgme_widget_message_reactions', 'tgme_widget_message_footer'):
                   el = bubble.find('div', class_=cls)
                   if el:
                       el.decompose()
               
-              # Handle reply quotes
-              reply_content = ''
+              reply_html = ''
               reply_el = bubble.find('a', class_='tgme_widget_message_reply')
               if reply_el:
-                  reply_text = reply_el.get_text(separator='\n', strip=True)
-                  reply_content = '> ' + reply_text.replace('\n', '\n> ') + '\n\n'
+                  reply_html = str(reply_el)
                   reply_el.decompose()
               
-              # Get main text
-              text_el = bubble.find('div', class_='tgme_widget_message_text')
-              if text_el:
-                  text = text_el.get_text(separator='\n', strip=True)
+              grouped = bubble.find('div', class_='tgme_widget_message_grouped_wrap')
+              if grouped:
+                  text_el = None
+                  for sibling in grouped.find_next_siblings('div'):
+                      if 'tgme_widget_message_text' in sibling.get('class', []):
+                          text_el = sibling
+                          break
               else:
-                  text = bubble.get_text(separator='\n', strip=True)
+                  text_el = bubble.find('div', class_='tgme_widget_message_text')
               
-              return reply_content + text
+              if text_el:
+                  inner = text_el.find('div', class_='tgme_widget_message_text')
+                  if inner:
+                      text_el = inner
+                  html_content = str(text_el) if text_el else ''
+              else:
+                  html_content = ''
+              
+              return (reply_html + html_content) if reply_html else html_content
           
           def download_media(url: str, filepath: Path, media_type: str) -> tuple[bool, int]:
               try:
                   head_resp = requests.head(url, timeout=30, headers=HEADERS)
                   content_length = int(head_resp.headers.get('content-length', 0))
-                  
                   if content_length > MAX_FILE_SIZE_BYTES:
-                      print(f"      ⚠️ {media_type} too large ({content_length/1024/1024:.1f}MB > {MAX_FILE_SIZE_MB}MB)")
+                      print(f"      ⚠️ {media_type} too large ({content_length/1024/1024:.1f}MB)")
                       return False, 0
-                  
                   resp = requests.get(url, timeout=120, stream=True, headers=HEADERS)
                   if resp.status_code == 200:
                       with open(filepath, 'wb') as f:
@@ -164,11 +220,11 @@ jobs:
                               f.write(chunk)
                       return True, content_length
               except Exception as e:
-                  print(f"      ❌ Failed to download {media_type}: {e}")
+                  print(f"      ❌ Failed: {e}")
               return False, 0
           
           # ============================================================================
-          # Fetch single channel
+          # Fetch channel
           # ============================================================================
           
           def fetch_channel(channel_url: str) -> list[dict]:
@@ -191,11 +247,11 @@ jobs:
               soup = BeautifulSoup(resp.text, 'lxml')
               channel_history = soup.find('section', class_='tgme_channel_history')
               if not channel_history:
-                  print(f"  ⚠️ No history section found")
+                  print(f"  ⚠️ No history section")
                   return []
               
               messages = channel_history.find_all('div', class_='tgme_widget_message_wrap')
-              print(f"  Found {len(messages)} total messages")
+              print(f"  Found {len(messages)} messages")
               
               channel_messages = []
               new_count = 0
@@ -210,13 +266,14 @@ jobs:
                       continue
                   
                   if msg_id in sent_ids:
-                      print(f"  Hit known message {msg_id}, stopping (found {new_count} new)")
+                      print(f"  Hit known {msg_id}, stopping (found {new_count} new)")
                       break
                   
                   timestamp = extract_timestamp(bubble)
-                  text = extract_text(bubble)
+                  html_content = extract_html_content(bubble)
+                  markdown_content = html_to_markdown(html_content)
                   
-                  # Extract media URLs
+                  # Extract media
                   photo_urls = []
                   for pw in bubble.find_all('a', class_='tgme_widget_message_photo_wrap'):
                       style = pw.get('style', '')
@@ -238,41 +295,30 @@ jobs:
                       if first_photo:
                           telegram_post_link = first_photo.get('href')
                   
+                  # Download media
                   downloaded_media = []
                   
-                  # Download photos
                   for i, url in enumerate(photo_urls[:MAX_PHOTOS_PER_MESSAGE]):
                       filename = f"{msg_id}_photo_{i}.jpg"
                       filepath = media_dir / filename
                       success, size = download_media(url, filepath, "photo")
                       if success:
-                          downloaded_media.append({
-                              'type': 'photo',
-                              'filename': filename,
-                              'size': size,
-                              'url': url
-                          })
-                          print(f"    📸 Downloaded photo {i+1}: {filename} ({size/1024:.0f}KB)")
+                          downloaded_media.append({'type': 'photo', 'filename': filename, 'size': size})
+                          print(f"    📸 Downloaded photo {i+1}")
                   
-                  # Download video
                   if video_url:
                       filename = f"{msg_id}_video.mp4"
                       filepath = media_dir / filename
                       success, size = download_media(video_url, filepath, "video")
                       if success:
-                          downloaded_media.append({
-                              'type': 'video',
-                              'filename': filename,
-                              'size': size,
-                              'url': video_url
-                          })
-                          print(f"    🎥 Downloaded video: {filename} ({size/1024/1024:.1f}MB)")
+                          downloaded_media.append({'type': 'video', 'filename': filename, 'size': size})
+                          print(f"    🎥 Downloaded video")
                   
                   message_data = {
                       'message_id': msg_id,
                       'channel': channel_name,
                       'channel_url': channel_url,
-                      'content': text,
+                      'content': markdown_content,
                       'timestamp': timestamp,
                       'photo_url': photo_urls[0] if photo_urls else None,
                       'photo_count': len(photo_urls),
@@ -288,32 +334,26 @@ jobs:
                   
                   channel_messages.append(message_data)
                   new_count += 1
-                  print(f"  ✅ Message {msg_id}: {len(text)} chars, {len(downloaded_media)} media")
+                  print(f"  ✅ Message {msg_id}")
                   
                   time.sleep(REQUEST_DELAY)
               
-              print(f"  Total new: {new_count} messages")
+              print(f"  Total new: {new_count}")
               return channel_messages
           
           # ============================================================================
-          # Parallel fetching
+          # Parallel fetch
           # ============================================================================
           
           all_messages = []
           
           with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-              future_to_channel = {
-                  executor.submit(fetch_channel, url): url 
-                  for url in CHANNELS if url
-              }
-              
+              future_to_channel = {executor.submit(fetch_channel, url): url for url in CHANNELS if url}
               for future in as_completed(future_to_channel):
-                  channel_url = future_to_channel[future]
                   try:
-                      messages = future.result()
-                      all_messages.extend(messages)
+                      all_messages.extend(future.result())
                   except Exception as e:
-                      print(f"❌ Failed to fetch {channel_url}: {e}")
+                      print(f"❌ Failed: {e}")
           
           summary = {
               'run_id': RUN_ID,
@@ -325,8 +365,7 @@ jobs:
           with open(Path(OUTPUT_DIR) / 'summary.json', 'w') as f:
               json.dump(summary, f, indent=2)
           
-          print(f"\n{'='*60}")
-          print(f"📊 Summary: {len(all_messages)} new messages from {len(summary['channels'])} channels")
+          print(f"\n📊 Summary: {len(all_messages)} new messages")
           
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"message_count={len(all_messages)}\n")
