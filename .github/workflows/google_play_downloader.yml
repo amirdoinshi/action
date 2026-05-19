@@ -140,7 +140,7 @@ jobs:
           curl -fsSL -o /tmp/APKEditor.jar "$APKEDITOR_URL"
           echo "APKEditor size: $(du -h /tmp/APKEditor.jar | cut -f1)"
 
-      - name: Merge splits with APKEditor
+      - name: Merge splits with APKEditor (improved)
         id: merge
         if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true'
         run: |
@@ -149,22 +149,49 @@ jobs:
           FINAL_APK="$OUTPUT_DIR/${PACKAGE}.apk"
           APK_COUNT="${{ steps.download.outputs.apk_count }}"
 
+          echo "APK count: $APK_COUNT"
+          echo "Output directory: $OUTPUT_DIR"
+          echo "Target final APK: $FINAL_APK"
+
           if [ "$APK_COUNT" -gt 1 ]; then
             echo "Merging $APK_COUNT split APKs with APKEditor..."
 
-            # APKEditor needs input splits in a directory separate from the output path
+            # Save original APKs for debugging
+            echo "Original APKs in $OUTPUT_DIR:"
+            ls -lh "$OUTPUT_DIR"/*.apk || true
+
+            # Move splits to temp directory
             mkdir -p /tmp/apk_splits
-            mv "$OUTPUT_DIR"/*.apk /tmp/apk_splits/
+            mv "$OUTPUT_DIR"/*.apk /tmp/apk_splits/ 2>/dev/null || true
 
-            java -jar /tmp/APKEditor.jar m \
+            echo "Splits moved to /tmp/apk_splits:"
+            ls -lh /tmp/apk_splits/
+
+            # Try merge with verbose output
+            echo "Running APKEditor merge..."
+            java -Xmx2g -jar /tmp/APKEditor.jar m \
               -i /tmp/apk_splits \
-              -o "$FINAL_APK"
+              -o "$FINAL_APK" \
+              2>&1 | tee /tmp/apkeditor_output.log
 
+            # Check if merge succeeded
             if [ ! -f "$FINAL_APK" ]; then
-              echo "Error: APKEditor did not produce an output file"
-              exit 1
+              echo "❌ APKEditor failed to produce output file"
+              echo "APKEditor exit code: $?"
+              echo "Last 20 lines of APKEditor output:"
+              tail -20 /tmp/apkeditor_output.log
+              
+              # Fallback: create ZIP with splits instead of failing
+              echo "⚠️ Falling back to ZIP packaging..."
+              cd /tmp/apk_splits
+              zip -j "$OUTPUT_DIR/${PACKAGE}_splits.zip" *.apk
+              echo "final_file=$OUTPUT_DIR/${PACKAGE}_splits.zip" >> "$GITHUB_OUTPUT"
+              echo "final_name=${PACKAGE}_splits.zip" >> "$GITHUB_OUTPUT"
+              echo "fallback=true" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-            echo "Merge complete: $(du -h "$FINAL_APK" | cut -f1)"
+
+            echo "✅ Merge successful: $(du -h "$FINAL_APK" | cut -f1)"
           else
             # Single APK (app is not split) — just rename for consistent output naming
             SINGLE=$(ls -1 "$OUTPUT_DIR"/*.apk | head -n1)
@@ -174,14 +201,30 @@ jobs:
 
           echo "final_file=$FINAL_APK" >> "$GITHUB_OUTPUT"
           echo "final_name=${PACKAGE}.apk" >> "$GITHUB_OUTPUT"
+          echo "fallback=false" >> "$GITHUB_OUTPUT"
+
+      # Debug step to verify merge outputs
+      - name: Debug merge outputs
+        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true'
+        run: |
+          echo "final_file: ${{ steps.merge.outputs.final_file }}"
+          echo "final_name: ${{ steps.merge.outputs.final_name }}"
+          echo "fallback: ${{ steps.merge.outputs.fallback }}"
+          echo "Contents of output folder:"
+          ls -lh "${{ inputs.output_folder }}" || echo "Folder empty or not found"
 
       # Re-sign is required after APKEditor reorganises the APK.
       # Note: apps with Play Integrity / certificate pinning will always fail
       # regardless of the key used — that is a limitation of any merge approach.
       - name: Sign merged APK
-        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true'
+        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true' && steps.merge.outputs.fallback == 'false'
         run: |
           FINAL_APK="${{ steps.merge.outputs.final_file }}"
+          
+          if [ -z "$FINAL_APK" ] || [ ! -f "$FINAL_APK" ]; then
+            echo "Warning: No APK to sign, skipping"
+            exit 0
+          fi
 
           keytool -genkey -v \
             -keystore /tmp/debug.jks \
@@ -211,6 +254,8 @@ jobs:
           OUTPUT_DIR="${{ inputs.output_folder }}"
           PACKAGE="${{ inputs.package_name }}"
           APK_COUNT="${{ steps.download.outputs.apk_count }}"
+
+          echo "Packaging splits (merge_splits=${{ inputs.merge_splits }}, sai_mode=${{ inputs.sai_mode }})"
 
           if [ "$APK_COUNT" -gt 1 ]; then
             cd "$OUTPUT_DIR"
@@ -247,17 +292,50 @@ jobs:
             echo "SAI APK: $(du -h "$OUTPUT_DIR/SAI.apk" | cut -f1)"
           fi
 
-      # ── Resolve final file path for downstream steps ───────────────────────
+      # ── Resolve final file path for downstream steps (CRITICAL FIX) ──
       - name: Resolve final file path
         id: final
         run: |
+          # Check which mode we're in and get the file path
           if [ "${{ inputs.merge_splits }}" = "true" ] && [ "${{ inputs.sai_mode }}" != "true" ]; then
-            echo "file_path=${{ steps.merge.outputs.final_file }}" >> "$GITHUB_OUTPUT"
-            echo "file_name=${{ steps.merge.outputs.final_name }}" >> "$GITHUB_OUTPUT"
+            # Merge mode - use merge step outputs
+            FINAL_PATH="${{ steps.merge.outputs.final_file }}"
+            FINAL_NAME="${{ steps.merge.outputs.final_name }}"
+            echo "Using merge mode output"
           else
-            echo "file_path=${{ steps.package_zip.outputs.final_file }}" >> "$GITHUB_OUTPUT"
-            echo "file_name=${{ steps.package_zip.outputs.final_name }}" >> "$GITHUB_OUTPUT"
+            # ZIP/SAI mode - use package_zip step outputs
+            FINAL_PATH="${{ steps.package_zip.outputs.final_file }}"
+            FINAL_NAME="${{ steps.package_zip.outputs.final_name }}"
+            echo "Using ZIP/SAI mode output"
           fi
+
+          # Validate that we have a file
+          if [ -z "$FINAL_PATH" ]; then
+            echo "❌ Error: No file path resolved!"
+            echo "merge_splits: ${{ inputs.merge_splits }}"
+            echo "sai_mode: ${{ inputs.sai_mode }}"
+            echo "Contents of output folder:"
+            ls -la "${{ inputs.output_folder }}" || echo "Folder empty"
+            exit 1
+          fi
+
+          if [ ! -f "$FINAL_PATH" ]; then
+            echo "❌ Error: Resolved file does not exist: $FINAL_PATH"
+            echo "Available files in ${{ inputs.output_folder }}:"
+            ls -la "${{ inputs.output_folder }}" || echo "Folder empty"
+            exit 1
+          fi
+
+          echo "file_path=$FINAL_PATH" >> "$GITHUB_OUTPUT"
+          echo "file_name=$FINAL_NAME" >> "$GITHUB_OUTPUT"
+          echo "✅ Resolved: $FINAL_NAME ($(du -h "$FINAL_PATH" | cut -f1))"
+
+      # Debug final resolution
+      - name: Debug final output
+        run: |
+          echo "Final file path: ${{ steps.final.outputs.file_path }}"
+          echo "Final file name: ${{ steps.final.outputs.file_name }}"
+          ls -lh "${{ steps.final.outputs.file_path }}" || echo "File missing!"
 
       # ── Split for git storage (repository / temp_branch only) ─────────────
       - name: Split file for git storage
