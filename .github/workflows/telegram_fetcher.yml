@@ -1,4 +1,4 @@
-name: Telegram Channel Fetcher
+name: TG Fetcher
 
 on:
   workflow_dispatch:
