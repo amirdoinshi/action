@@ -234,7 +234,7 @@ jobs:
 
       # Re-sign is required after APKEditor reorganises the APK.
       - name: Sign merged APK
-        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true' && steps.merge.outputs.fallback == 'false' && steps.merge.outputs.final_file != ''
+        if: inputs.merge_splits != false && inputs.sai_mode != true && steps.merge.outputs.fallback == 'false' && steps.merge.outputs.final_file != ''
         run: |
           FINAL_APK="${{ steps.merge.outputs.final_file }}"
           
