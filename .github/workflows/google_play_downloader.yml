@@ -131,7 +131,7 @@ jobs:
       # Download APKEditor (the proper tool for merging split APKs — handles
       # resource tables, native libs, and manifests correctly).
       - name: Download APKEditor
-        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true'
+        if: inputs.merge_splits != false && inputs.sai_mode != true
         run: |
           APKEDITOR_URL=$(curl -fsSL \
             https://api.github.com/repos/REAndroid/APKEditor/releases/latest \
@@ -149,7 +149,7 @@ jobs:
 
       - name: Merge splits with APKEditor (improved)
         id: merge
-        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true'
+        if: inputs.merge_splits != false && inputs.sai_mode != true
         run: |
           set -e  # Exit on error
           
@@ -218,7 +218,7 @@ jobs:
 
       # Debug step to verify merge outputs
       - name: Debug merge outputs
-        if: inputs.merge_splits == 'true' && inputs.sai_mode != 'true'
+        if: inputs.merge_splits != false && inputs.sai_mode != true
         run: |
           echo "final_file: '${{ steps.merge.outputs.final_file }}'"
           echo "final_name: '${{ steps.merge.outputs.final_name }}'"
@@ -264,7 +264,7 @@ jobs:
       # ── Path B: merge_splits = false  OR  sai_mode = true ────────────────
       - name: Package splits as ZIP (no merge)
         id: package_zip
-        if: inputs.merge_splits == 'false' || inputs.sai_mode == 'true'
+        if: inputs.merge_splits == false || inputs.sai_mode == true
         run: |
           OUTPUT_DIR="${{ inputs.output_folder }}"
           PACKAGE="${{ inputs.package_name }}"
@@ -293,7 +293,7 @@ jobs:
 
       # Download SAI installer APK so the user has everything they need in one go.
       - name: Download SAI installer APK
-        if: inputs.sai_mode == 'true'
+        if: inputs.sai_mode == true
         run: |
           OUTPUT_DIR="${{ inputs.output_folder }}"
 
@@ -315,8 +315,8 @@ jobs:
         id: final
         run: |
           # Determine which mode we're in
-          MERGE_MODE="${{ inputs.merge_splits == 'true' && inputs.sai_mode != 'true' }}"
-          SAI_MODE="${{ inputs.sai_mode == 'true' }}"
+          MERGE_MODE="${{ inputs.merge_splits != false && inputs.sai_mode != true }}"
+          SAI_MODE="${{ inputs.sai_mode == true }}"
           
           echo "Merge mode: $MERGE_MODE"
           echo "SAI mode: $SAI_MODE"
