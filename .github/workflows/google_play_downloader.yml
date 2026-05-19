@@ -110,12 +110,19 @@ jobs:
           echo "Running: $CMD"
           $CMD
 
-          cd "$OUTPUT_DIR"
-          APK_COUNT=$(ls -1 *.apk 2>/dev/null | wc -l)
-          if [ "$APK_COUNT" -eq 0 ]; then
+          # gplay may create a package-named subfolder inside OUTPUT_DIR;
+          # find APKs wherever they landed and hoist them up.
+          APK_LIST=$(find "$OUTPUT_DIR" -name "*.apk" 2>/dev/null)
+          if [ -z "$APK_LIST" ]; then
             echo "Error: No APK files downloaded"
             exit 1
           fi
+
+          # Move any APKs from subfolders into OUTPUT_DIR directly
+          find "$OUTPUT_DIR" -mindepth 2 -name "*.apk" -exec mv {} "$OUTPUT_DIR/" \;
+          find "$OUTPUT_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+          cd "$OUTPUT_DIR"
+          APK_COUNT=$(ls -1 *.apk 2>/dev/null | wc -l)
           echo "Downloaded $APK_COUNT APK file(s):"
           ls -lh *.apk
           echo "apk_count=$APK_COUNT" >> "$GITHUB_OUTPUT"
