@@ -1,0 +1,483 @@
+name: دانلود فایل نصبی گوگل پلی
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'Package name (e.g., com.google.android.youtube)'
+        required: true
+        type: string
+      architecture:
+        description: 'Target architecture'
+        required: true
+        type: choice
+        default: 'arm64'
+        options:
+          - arm64
+          - armv7
+      merge_splits:
+        description: 'Merge split APKs into single installable APK (uses APKEditor)'
+        required: false
+        type: boolean
+        default: true
+      sai_mode:
+        description: 'SAI mode: send split ZIP + SAI installer APK (overrides merge_splits)'
+        required: false
+        type: boolean
+        default: false
+      output_folder:
+        description: 'Output folder (relative to repo root)'
+        required: false
+        type: string
+        default: 'downloads'
+
+      upload_method:
+        description: 'Upload method: repository (push to repo), release (GitHub Releases), or temp_branch'
+        required: false
+        type: choice
+        options:
+          - repository
+          - release
+          - temp_branch
+        default: 'repository'
+
+      release_tag:
+        description: 'Release tag name (only used when upload_method = release)'
+        required: false
+        type: string
+        default: ''
+
+      branch_name:
+        description: 'Temporary branch name (internal use only)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  download-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Create or checkout temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          git checkout -b "${{ github.event.inputs.branch_name }}"
+          git push -u origin "${{ github.event.inputs.branch_name }}"
+
+      - name: Create output folder
+        run: mkdir -p "${{ inputs.output_folder }}"
+
+      - name: Cache & install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: openjdk-17-jre-headless apksigner python3 python3-venv python3-pip curl git zip
+          version: '1.0'
+
+      - name: Clone gplay-apk-downloader
+        run: |
+          git clone https://github.com/alltechdev/gplay-apk-downloader.git
+          cd gplay-apk-downloader
+          ./setup.sh
+
+      - name: Authenticate with Google Play
+        run: |
+          cd gplay-apk-downloader
+          echo "y" | ./gplay auth
+          echo "Authentication completed."
+
+      # sai_mode implies no merge — enforce it here so downstream steps are consistent.
+      - name: Apply SAI mode overrides
+        if: inputs.sai_mode == 'true'
+        run: echo "SAI mode active — splits will be zipped, SAI installer will be included."
+
+      # Always download raw splits — never use gplay's built-in -m merge,
+      # which produces incomplete APKs. APKEditor handles merging below.
+      - name: Download APK splits
+        id: download
+        run: |
+          cd gplay-apk-downloader
+          OUTPUT_DIR="../${{ inputs.output_folder }}"
+
+          CMD="./gplay download ${{ inputs.package_name }} -a ${{ inputs.architecture }} -o $OUTPUT_DIR"
+          echo "Running: $CMD"
+          $CMD
+
+          # gplay may create a package-named subfolder inside OUTPUT_DIR;
+          # find APKs wherever they landed and hoist them up.
+          APK_LIST=$(find "$OUTPUT_DIR" -name "*.apk" 2>/dev/null)
+          if [ -z "$APK_LIST" ]; then
+            echo "Error: No APK files downloaded"
+            exit 1
+          fi
+
+          # Move any APKs from subfolders into OUTPUT_DIR directly
+          find "$OUTPUT_DIR" -mindepth 2 -name "*.apk" -exec mv {} "$OUTPUT_DIR/" \;
+          find "$OUTPUT_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+          cd "$OUTPUT_DIR"
+          APK_COUNT=$(ls -1 *.apk 2>/dev/null | wc -l)
+          echo "Downloaded $APK_COUNT APK file(s):"
+          ls -lh *.apk
+          echo "apk_count=$APK_COUNT" >> "$GITHUB_OUTPUT"
+
+      # ── Path A: merge_splits = true (and not sai_mode) ────────────────────────
+      # Download APKEditor (the proper tool for merging split APKs — handles
+      # resource tables, native libs, and manifests correctly).
+      - name: Download APKEditor
+        if: inputs.merge_splits != false && inputs.sai_mode != true
+        run: |
+          APKEDITOR_URL=$(curl -fsSL \
+            https://api.github.com/repos/REAndroid/APKEditor/releases/latest \
+            | grep -oP '"browser_download_url":\s*"\K[^"]+APKEditor[^"]+\.jar' \
+            | head -n1)
+
+          if [ -z "$APKEDITOR_URL" ]; then
+            echo "Error: Could not find APKEditor download URL"
+            exit 1
+          fi
+
+          echo "Downloading APKEditor from: $APKEDITOR_URL"
+          curl -fsSL -o /tmp/APKEditor.jar "$APKEDITOR_URL"
+          echo "APKEditor size: $(du -h /tmp/APKEditor.jar | cut -f1)"
+
+      - name: Merge splits with APKEditor (improved)
+        id: merge
+        if: inputs.merge_splits != false && inputs.sai_mode != true
+        run: |
+          set -e  # Exit on error
+          
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+          PACKAGE="${{ inputs.package_name }}"
+          FINAL_APK="$OUTPUT_DIR/${PACKAGE}.apk"
+          APK_COUNT="${{ steps.download.outputs.apk_count }}"
+
+          echo "APK count: $APK_COUNT"
+          echo "Output directory: $OUTPUT_DIR"
+          echo "Target final APK: $FINAL_APK"
+
+          # Debug: show current files
+          echo "Current files in $OUTPUT_DIR:"
+          ls -la "$OUTPUT_DIR/"
+
+          if [ "$APK_COUNT" -eq 1 ]; then
+            # Single APK - just rename it
+            SINGLE=$(ls -1 "$OUTPUT_DIR"/*.apk | head -n1)
+            mv "$SINGLE" "$FINAL_APK"
+            echo "Single APK, renamed to $FINAL_APK"
+            echo "final_file=$FINAL_APK" >> "$GITHUB_OUTPUT"
+            echo "final_name=${PACKAGE}.apk" >> "$GITHUB_OUTPUT"
+            echo "fallback=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Multiple splits - try to merge
+          echo "Merging $APK_COUNT split APKs with APKEditor..."
+
+          # Move splits to temp directory
+          mkdir -p /tmp/apk_splits
+          mv "$OUTPUT_DIR"/*.apk /tmp/apk_splits/
+
+          echo "Splits moved to /tmp/apk_splits:"
+          ls -lh /tmp/apk_splits/
+
+          # Try merge with verbose output
+          echo "Running APKEditor merge..."
+          java -Xmx2g -jar /tmp/APKEditor.jar m \
+            -i /tmp/apk_splits \
+            -o "$FINAL_APK" \
+            2>&1 | tee /tmp/apkeditor_output.log
+
+          # Check if merge succeeded
+          if [ -f "$FINAL_APK" ]; then
+            echo "✅ Merge successful: $(du -h "$FINAL_APK" | cut -f1)"
+            echo "final_file=$FINAL_APK" >> "$GITHUB_OUTPUT"
+            echo "final_name=${PACKAGE}.apk" >> "$GITHUB_OUTPUT"
+            echo "fallback=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "❌ APKEditor failed to produce output file"
+            echo "APKEditor exit code: $?"
+            echo "Last 20 lines of APKEditor output:"
+            tail -20 /tmp/apkeditor_output.log
+            
+            # Fallback: create ZIP with splits
+            echo "⚠️ Falling back to ZIP packaging..."
+            cd /tmp/apk_splits
+            ZIP_FILE="$OUTPUT_DIR/${PACKAGE}_splits.zip"
+            zip -j "$ZIP_FILE" *.apk
+            echo "final_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+            echo "final_name=${PACKAGE}_splits.zip" >> "$GITHUB_OUTPUT"
+            echo "fallback=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Debug step to verify merge outputs
+      - name: Debug merge outputs
+        if: inputs.merge_splits != false && inputs.sai_mode != true
+        run: |
+          echo "final_file: '${{ steps.merge.outputs.final_file }}'"
+          echo "final_name: '${{ steps.merge.outputs.final_name }}'"
+          echo "fallback: '${{ steps.merge.outputs.fallback }}'"
+          echo ""
+          echo "Contents of output folder:"
+          ls -la "${{ inputs.output_folder }}" || echo "Folder empty"
+          
+          if [ -z "${{ steps.merge.outputs.final_file }}" ]; then
+            echo "::error::Merge step did not set final_file output!"
+            exit 1
+          fi
+
+      # Re-sign is required after APKEditor reorganises the APK.
+      - name: Sign merged APK
+        if: inputs.merge_splits != false && inputs.sai_mode != true && steps.merge.outputs.fallback == 'false' && steps.merge.outputs.final_file != ''
+        run: |
+          FINAL_APK="${{ steps.merge.outputs.final_file }}"
+          
+          if [ ! -f "$FINAL_APK" ]; then
+            echo "Warning: No APK to sign at $FINAL_APK, skipping"
+            exit 0
+          fi
+
+          keytool -genkey -v \
+            -keystore /tmp/debug.jks \
+            -alias key0 \
+            -keyalg RSA -keysize 2048 -validity 9999 \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+
+          apksigner sign \
+            --ks /tmp/debug.jks \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "${FINAL_APK}.signed" \
+            "$FINAL_APK"
+
+          mv "${FINAL_APK}.signed" "$FINAL_APK"
+          echo "Signed successfully."
+          apksigner verify --print-certs "$FINAL_APK" 2>/dev/null | head -3 || true
+
+      # ── Path B: merge_splits = false  OR  sai_mode = true ────────────────
+      - name: Package splits as ZIP (no merge)
+        id: package_zip
+        if: inputs.merge_splits == false || inputs.sai_mode == true
+        run: |
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+          PACKAGE="${{ inputs.package_name }}"
+          APK_COUNT="${{ steps.download.outputs.apk_count }}"
+
+          echo "Packaging splits (merge_splits=${{ inputs.merge_splits }}, sai_mode=${{ inputs.sai_mode }})"
+          echo "APK count: $APK_COUNT"
+          echo "Contents of $OUTPUT_DIR before packaging:"
+          ls -la "$OUTPUT_DIR/"
+
+          if [ "$APK_COUNT" -gt 1 ]; then
+            cd "$OUTPUT_DIR"
+            ZIP_FILE="${PACKAGE}.zip"
+            zip -j "$ZIP_FILE" *.apk
+            echo "Packaged $APK_COUNT splits → $ZIP_FILE"
+            
+            # Remove the individual split APKs after zipping
+            rm -f *.apk
+            echo "Removed individual split APKs, keeping only $ZIP_FILE"
+            
+            echo "final_file=$OUTPUT_DIR/$ZIP_FILE" >> "$GITHUB_OUTPUT"
+            echo "final_name=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          else
+            # Single APK - don't zip, just keep it as is
+            cd "$OUTPUT_DIR"
+            SINGLE=$(ls -1 *.apk | head -n1)
+            echo "Single APK detected: $SINGLE (no zipping needed)"
+            echo "final_file=$OUTPUT_DIR/$SINGLE" >> "$GITHUB_OUTPUT"
+            echo "final_name=$SINGLE" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Download SAI installer APK so the user has everything they need in one go.
+      - name: Download SAI installer APK
+        if: inputs.sai_mode == true
+        run: |
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+
+          SAI_URL=$(curl -fsSL \
+            https://api.github.com/repos/Aefyr/SAI/releases/latest \
+            | grep -oP '"browser_download_url":\s*"\K[^"]+\.apk' \
+            | head -n1)
+
+          if [ -z "$SAI_URL" ]; then
+            echo "Warning: Could not fetch SAI release URL from GitHub API — skipping SAI APK"
+          else
+            echo "Downloading SAI from: $SAI_URL"
+            curl -fsSL -o "$OUTPUT_DIR/SAI.apk" "$SAI_URL"
+            echo "SAI APK: $(du -h "$OUTPUT_DIR/SAI.apk" | cut -f1)"
+          fi
+          
+      # Clean up: In SAI mode, we only want the ZIP and SAI.apk, not the raw splits
+      - name: Clean up raw splits in SAI mode
+        if: inputs.sai_mode == true
+        run: |
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+          APK_COUNT="${{ steps.download.outputs.apk_count }}"
+          
+          echo "SAI mode cleanup - APK count: $APK_COUNT"
+          echo "Current files in $OUTPUT_DIR:"
+          ls -la "$OUTPUT_DIR/"
+          
+          # Only delete split APKs when there are multiple files (they were zipped)
+          # For single APK, keep it (SAI can install single APKs directly)
+          if [ "$APK_COUNT" -gt 1 ]; then
+            # Multiple splits were zipped - remove individual APKs, keep only ZIP and SAI.apk
+            find "$OUTPUT_DIR" -maxdepth 1 -name "*.apk" ! -name "SAI.apk" -type f -delete
+            echo "Multi-split mode: removed $APK_COUNT split APKs, keeping only ZIP and SAI.apk"
+          else
+            echo "Single APK mode: keeping the APK file (SAI can install it directly)"
+            # Rename versioned APK to package name if it's not already named correctly
+            for f in "$OUTPUT_DIR"/*.apk; do
+              BASENAME=$(basename "$f")
+              if [ "$BASENAME" != "SAI.apk" ] && [ "$BASENAME" != "${{ inputs.package_name }}.apk" ]; then
+                echo "Renaming $BASENAME to ${{ inputs.package_name }}.apk"
+                mv "$f" "$OUTPUT_DIR/${{ inputs.package_name }}.apk" 2>/dev/null || echo "APK already has correct name or rename failed"
+              fi
+            done
+          fi
+          
+          echo "Files after cleanup:"
+          ls -la "$OUTPUT_DIR/"
+      # ── Resolve final file path (CRITICAL FIX) ──
+      - name: Resolve final file path
+        id: final
+        run: |
+          # Determine which mode we're in
+          MERGE_MODE="${{ inputs.merge_splits != false && inputs.sai_mode != true }}"
+          SAI_MODE="${{ inputs.sai_mode == true }}"
+          
+          echo "Merge mode: $MERGE_MODE"
+          echo "SAI mode: $SAI_MODE"
+          
+          # Get the file path from the appropriate step
+          if [ "$MERGE_MODE" = "true" ]; then
+            FINAL_PATH="${{ steps.merge.outputs.final_file }}"
+            FINAL_NAME="${{ steps.merge.outputs.final_name }}"
+            echo "Using merge mode output"
+          else
+            FINAL_PATH="${{ steps.package_zip.outputs.final_file }}"
+            FINAL_NAME="${{ steps.package_zip.outputs.final_name }}"
+            echo "Using package_zip mode output"
+          fi
+          
+          # Debug: show what we got
+          echo "Raw FINAL_PATH: '$FINAL_PATH'"
+          echo "Raw FINAL_NAME: '$FINAL_NAME'"
+          
+          # If still empty, try to find any file in output folder
+          if [ -z "$FINAL_PATH" ]; then
+            echo "⚠️ No file path from workflow steps, scanning output folder..."
+            OUTPUT_DIR="${{ inputs.output_folder }}"
+            
+            # Find any APK or ZIP file in output folder
+            FOUND_FILE=$(ls -1 "$OUTPUT_DIR"/*.{apk,zip} 2>/dev/null | head -n1 || echo "")
+            
+            if [ -n "$FOUND_FILE" ]; then
+              FINAL_PATH="$FOUND_FILE"
+              FINAL_NAME=$(basename "$FOUND_FILE")
+              echo "Found file automatically: $FINAL_NAME"
+            else
+              echo "❌ Error: No file found in $OUTPUT_DIR!"
+              echo "Contents of output folder:"
+              ls -la "$OUTPUT_DIR/"
+              exit 1
+            fi
+          fi
+          
+          # Validate file exists
+          if [ ! -f "$FINAL_PATH" ]; then
+            echo "❌ Error: File does not exist: $FINAL_PATH"
+            echo "Available files in ${{ inputs.output_folder }}:"
+            ls -la "${{ inputs.output_folder }}"
+            exit 1
+          fi
+          
+          # Set outputs
+          echo "file_path=$FINAL_PATH" >> "$GITHUB_OUTPUT"
+          echo "file_name=$FINAL_NAME" >> "$GITHUB_OUTPUT"
+          
+          FILE_SIZE=$(du -h "$FINAL_PATH" | cut -f1)
+          echo "✅ Resolved: $FINAL_NAME ($FILE_SIZE)"
+
+      # ── Split for git storage (repository / temp_branch only) ─────────────
+      - name: Split file for git storage
+        if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
+        run: |
+          FINAL_FILE="${{ steps.final.outputs.file_path }}"
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+          BASENAME=$(basename "$FINAL_FILE")
+          FILE_SIZE=$(stat -c%s "$FINAL_FILE")
+          THRESHOLD_BYTES=$((85 * 1024 * 1024))
+
+          echo "File: $BASENAME"
+          echo "Size: $FILE_SIZE bytes"
+          echo "Threshold: $THRESHOLD_BYTES bytes"
+
+          if [ "$FILE_SIZE" -gt "$THRESHOLD_BYTES" ]; then
+            echo "File is $(( FILE_SIZE / 1024 / 1024 )) MB — splitting into 85 MB parts..."
+            cd "$OUTPUT_DIR"
+            split -b 85m -d -a 3 "$BASENAME" "${BASENAME}.part_"
+            PART_COUNT=$(ls "${BASENAME}.part_"* 2>/dev/null | wc -l)
+            echo "Created $PART_COUNT parts"
+            rm -f "$BASENAME"
+          else
+            echo "File is $(( FILE_SIZE / 1024 / 1024 )) MB — no split needed"
+          fi
+
+      - name: Commit and push (repository mode)
+        if: github.event.inputs.upload_method == 'repository'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.output_folder }}/"
+          git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
+          for push_attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Commit and push (temp_branch mode)
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.output_folder }}/"
+          git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
+          for push_attempt in 1 2 3; do
+            if git push origin "${{ github.event.inputs.branch_name }}"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Upload to GitHub Releases
+        if: github.event.inputs.upload_method == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('apk-{0}', github.run_number) }}
+          name: "Google Play — ${{ inputs.package_name }}"
+          body: |
+            Google Play APK Download
+
+            Package: ${{ inputs.package_name }}
+            Architecture: ${{ inputs.architecture }}
+            File: ${{ steps.final.outputs.file_name }}
+            Mode: ${{ inputs.sai_mode == 'true' && 'SAI split ZIP' || inputs.merge_splits == 'true' && 'Merged APK' || 'Split ZIP' }}
+
+            Powered by Meli-Action ⚡
+          files: ${{ inputs.output_folder }}/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
