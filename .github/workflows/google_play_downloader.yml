@@ -459,7 +459,7 @@ jobs:
         if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
         run: |
           git config user.name "github-actions[bot]"
-          git config.user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "${{ inputs.output_folder }}/"
           git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
           for push_attempt in 1 2 3; do
