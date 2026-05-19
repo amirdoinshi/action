@@ -11,6 +11,11 @@ on:
         description: 'Unique run ID for this fetch'
         required: true
         type: string
+      history:
+        description: 'JSON string of already sent message IDs per channel'
+        required: false
+        type: string
+        default: '{}'
 
 permissions:
   contents: write
@@ -18,7 +23,7 @@ permissions:
 jobs:
   fetch-telegram:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     
     steps:
       - name: Checkout repository
@@ -33,7 +38,7 @@ jobs:
           
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 lxml
           
       - name: Fetch Telegram messages and media
         run: |
@@ -45,209 +50,274 @@ jobs:
           import requests
           from bs4 import BeautifulSoup
           from pathlib import Path
-          from datetime import datetime
-          from urllib.parse import urlparse
+          from datetime import datetime, timezone, timedelta
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          
+          # ============================================================================
+          # Configuration
+          # ============================================================================
           
           CHANNELS = os.environ.get("INPUT_CHANNELS", "").split(",")
           RUN_ID = os.environ.get("INPUT_RUN_ID", "")
+          HISTORY_JSON = os.environ.get("INPUT_HISTORY", "{}")
           OUTPUT_DIR = f"downloads/run_{RUN_ID}"
           
+          # Tehran timezone (UTC+3:30)
+          TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+          
+          # Rate limiting - max 2 concurrent requests to t.me
+          MAX_WORKERS = 2
+          REQUEST_DELAY = 1.0
+          
+          # Media settings
+          MAX_FILE_SIZE_MB = 50
+          MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+          MAX_PHOTOS_PER_MESSAGE = 5
+          
+          # Headers
+          HEADERS = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+          
+          # Create directories
           Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
           media_dir = Path(f"{OUTPUT_DIR}/media")
           media_dir.mkdir(exist_ok=True)
           
-          MAX_FILE_SIZE_MB = 50
-          MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+          # Load history
+          sent_history = json.loads(HISTORY_JSON) if HISTORY_JSON else {}
           
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
+          # Regex patterns
+          RE_MSG_ID = re.compile(r'/(\d+)$')
+          RE_BG_IMAGE_URL = re.compile(r"background-image:url\('([^']+)'\)")
+          RE_TIME = re.compile(r'(\d{1,2}:\d{2})')
           
-          all_messages = []
+          # ============================================================================
+          # Helper functions
+          # ============================================================================
           
-          for channel_url in CHANNELS:
+          def extract_message_id(wrap) -> str | None:
+              try:
+                  link = wrap.find('a', class_='tgme_widget_message_date')
+                  if link and link.get('href'):
+                      m = RE_MSG_ID.search(link['href'])
+                      if m:
+                          return m.group(1)
+              except Exception:
+                  pass
+              return None
+          
+          def extract_timestamp(bubble) -> str | None:
+              try:
+                  time_el = bubble.find('time', class_='time')
+                  if time_el and time_el.get('datetime'):
+                      dt = datetime.fromisoformat(time_el['datetime'].replace('Z', '+00:00'))
+                      tehran_dt = dt.astimezone(timezone.utc) + TEHRAN_TZ
+                      return tehran_dt.strftime('%H:%M')
+                  
+                  footer = bubble.find('div', class_='tgme_widget_message_footer')
+                  if footer:
+                      m = RE_TIME.search(footer.get_text())
+                      if m:
+                          return m.group(1)
+              except Exception:
+                  pass
+              return None
+          
+          def extract_text(bubble) -> str:
+              # Strip reactions and footer
+              for cls in ('tgme_widget_message_reactions', 'tgme_widget_message_footer'):
+                  el = bubble.find('div', class_=cls)
+                  if el:
+                      el.decompose()
+              
+              # Handle reply quotes
+              reply_content = ''
+              reply_el = bubble.find('a', class_='tgme_widget_message_reply')
+              if reply_el:
+                  reply_text = reply_el.get_text(separator='\n', strip=True)
+                  reply_content = '> ' + reply_text.replace('\n', '\n> ') + '\n\n'
+                  reply_el.decompose()
+              
+              # Get main text
+              text_el = bubble.find('div', class_='tgme_widget_message_text')
+              if text_el:
+                  text = text_el.get_text(separator='\n', strip=True)
+              else:
+                  text = bubble.get_text(separator='\n', strip=True)
+              
+              return reply_content + text
+          
+          def download_media(url: str, filepath: Path, media_type: str) -> tuple[bool, int]:
+              try:
+                  head_resp = requests.head(url, timeout=30, headers=HEADERS)
+                  content_length = int(head_resp.headers.get('content-length', 0))
+                  
+                  if content_length > MAX_FILE_SIZE_BYTES:
+                      print(f"      ⚠️ {media_type} too large ({content_length/1024/1024:.1f}MB > {MAX_FILE_SIZE_MB}MB)")
+                      return False, 0
+                  
+                  resp = requests.get(url, timeout=120, stream=True, headers=HEADERS)
+                  if resp.status_code == 200:
+                      with open(filepath, 'wb') as f:
+                          for chunk in resp.iter_content(chunk_size=8192):
+                              f.write(chunk)
+                      return True, content_length
+              except Exception as e:
+                  print(f"      ❌ Failed to download {media_type}: {e}")
+              return False, 0
+          
+          # ============================================================================
+          # Fetch single channel
+          # ============================================================================
+          
+          def fetch_channel(channel_url: str) -> list[dict]:
               channel_url = channel_url.strip()
               if not channel_url:
-                  continue
+                  return []
               
               channel_name = channel_url.rstrip('/').split('/')[-1]
               print(f"\n📡 Fetching: {channel_name}")
               
+              sent_ids = sent_history.get(channel_url, [])
+              
               try:
-                  resp = requests.get(channel_url, headers=headers, timeout=30)
+                  resp = requests.get(channel_url, headers=HEADERS, timeout=30)
                   resp.raise_for_status()
               except Exception as e:
                   print(f"  ❌ Failed: {e}")
-                  continue
+                  return []
               
-              soup = BeautifulSoup(resp.text, 'html.parser')
-              messages = soup.find_all('div', class_='tgme_widget_message')
+              soup = BeautifulSoup(resp.text, 'lxml')
+              channel_history = soup.find('section', class_='tgme_channel_history')
+              if not channel_history:
+                  print(f"  ⚠️ No history section found")
+                  return []
               
-              print(f"  Found {len(messages)} messages")
+              messages = channel_history.find_all('div', class_='tgme_widget_message_wrap')
+              print(f"  Found {len(messages)} total messages")
               
-              for msg in messages:
-                  # Extract message ID
-                  msg_link = msg.find('a', class_='tgme_widget_message_date')
-                  if not msg_link or not msg_link.get('href'):
+              channel_messages = []
+              new_count = 0
+              
+              for wrap in reversed(messages):
+                  bubble = wrap.find('div', class_='tgme_widget_message_bubble')
+                  if not bubble:
                       continue
                   
-                  msg_id = msg_link['href'].split('/')[-1]
+                  msg_id = extract_message_id(wrap)
+                  if not msg_id:
+                      continue
                   
-                  # Extract timestamp
-                  time_elem = msg.find('time')
-                  timestamp = time_elem.get('datetime') if time_elem else None
+                  if msg_id in sent_ids:
+                      print(f"  Hit known message {msg_id}, stopping (found {new_count} new)")
+                      break
                   
-                  # Extract text content
-                  text_elem = msg.find('div', class_='tgme_widget_message_text')
-                  text = text_elem.get_text() if text_elem else ""
+                  timestamp = extract_timestamp(bubble)
+                  text = extract_text(bubble)
                   
-                  # Extract media (photos)
+                  # Extract media URLs
                   photo_urls = []
-                  photo_wraps = msg.find_all('a', class_='tgme_widget_message_photo_wrap')
-                  
-                  for pw in photo_wraps:
+                  for pw in bubble.find_all('a', class_='tgme_widget_message_photo_wrap'):
                       style = pw.get('style', '')
-                      match = re.search(r"url\('([^']+)'\)", style)
+                      match = RE_BG_IMAGE_URL.search(style)
                       if match:
                           photo_urls.append(match.group(1))
                   
-                  # Extract video
                   video_url = None
-                  video_elem = msg.find('video')
-                  if video_elem and video_elem.get('src'):
-                      video_url = video_elem['src']
+                  video_el = bubble.find('video')
+                  if video_el and video_el.get('src'):
+                      video_url = video_el['src']
                   
-                  # Extract document
-                  doc_url = None
-                  doc_elem = msg.find('a', class_='tgme_widget_message_document')
-                  if doc_elem and doc_elem.get('href'):
-                      doc_url = doc_elem['href']
+                  telegram_post_link = None
+                  video_player = bubble.find('a', class_='tgme_widget_message_video_player')
+                  if video_player:
+                      telegram_post_link = video_player.get('href')
+                  elif photo_urls:
+                      first_photo = bubble.find('a', class_='tgme_widget_message_photo_wrap')
+                      if first_photo:
+                          telegram_post_link = first_photo.get('href')
                   
-                  # Download media files
                   downloaded_media = []
                   
                   # Download photos
-                  for i, url in enumerate(photo_urls[:5]):  # Max 5 photos per message
-                      try:
-                          resp = requests.get(url, timeout=60, stream=True)
-                          if resp.status_code == 200:
-                              # Check content length
-                              content_length = int(resp.headers.get('content-length', 0))
-                              if content_length > MAX_FILE_SIZE_BYTES:
-                                  print(f"    ⚠️ Photo too large ({content_length/1024/1024:.1f}MB > {MAX_FILE_SIZE_MB}MB), skipping")
-                                  continue
-                              
-                              ext = url.split('.')[-1].split('?')[0]
-                              if ext not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-                                  ext = 'jpg'
-                              
-                              filename = f"{msg_id}_photo_{i}.{ext}"
-                              filepath = media_dir / filename
-                              
-                              with open(filepath, 'wb') as f:
-                                  for chunk in resp.iter_content(chunk_size=8192):
-                                      f.write(chunk)
-                              
-                              downloaded_media.append({
-                                  'type': 'photo',
-                                  'filename': filename,
-                                  'size': content_length
-                              })
-                              print(f"    📸 Downloaded photo {i+1}: {filename} ({content_length/1024:.0f}KB)")
-                      except Exception as e:
-                          print(f"    ❌ Failed to download photo: {e}")
+                  for i, url in enumerate(photo_urls[:MAX_PHOTOS_PER_MESSAGE]):
+                      filename = f"{msg_id}_photo_{i}.jpg"
+                      filepath = media_dir / filename
+                      success, size = download_media(url, filepath, "photo")
+                      if success:
+                          downloaded_media.append({
+                              'type': 'photo',
+                              'filename': filename,
+                              'size': size,
+                              'url': url
+                          })
+                          print(f"    📸 Downloaded photo {i+1}: {filename} ({size/1024:.0f}KB)")
                   
                   # Download video
                   if video_url:
-                      try:
-                          # First check size with HEAD
-                          head_resp = requests.head(video_url, timeout=30)
-                          content_length = int(head_resp.headers.get('content-length', 0))
-                          
-                          if content_length > MAX_FILE_SIZE_BYTES:
-                              print(f"    ⚠️ Video too large ({content_length/1024/1024:.1f}MB > {MAX_FILE_SIZE_MB}MB), skipping")
-                          else:
-                              resp = requests.get(video_url, timeout=120, stream=True)
-                              if resp.status_code == 200:
-                                  filename = f"{msg_id}_video.mp4"
-                                  filepath = media_dir / filename
-                                  
-                                  with open(filepath, 'wb') as f:
-                                      for chunk in resp.iter_content(chunk_size=8192):
-                                          f.write(chunk)
-                                  
-                                  downloaded_media.append({
-                                      'type': 'video',
-                                      'filename': filename,
-                                      'size': content_length
-                                  })
-                                  print(f"    🎥 Downloaded video: {filename} ({content_length/1024/1024:.1f}MB)")
-                      except Exception as e:
-                          print(f"    ❌ Failed to download video: {e}")
+                      filename = f"{msg_id}_video.mp4"
+                      filepath = media_dir / filename
+                      success, size = download_media(video_url, filepath, "video")
+                      if success:
+                          downloaded_media.append({
+                              'type': 'video',
+                              'filename': filename,
+                              'size': size,
+                              'url': video_url
+                          })
+                          print(f"    🎥 Downloaded video: {filename} ({size/1024/1024:.1f}MB)")
                   
-                  # Download document
-                  if doc_url:
-                      try:
-                          resp = requests.get(doc_url, timeout=60, stream=True)
-                          if resp.status_code == 200:
-                              content_length = int(resp.headers.get('content-length', 0))
-                              if content_length > MAX_FILE_SIZE_BYTES:
-                                  print(f"    ⚠️ Document too large ({content_length/1024/1024:.1f}MB > {MAX_FILE_SIZE_MB}MB), skipping")
-                              else:
-                                  # Extract filename from Content-Disposition or URL
-                                  filename = f"{msg_id}_document"
-                                  if 'content-disposition' in resp.headers:
-                                      cd = resp.headers['content-disposition']
-                                      match = re.search(r'filename="?([^"]+)"?', cd)
-                                      if match:
-                                          filename = match.group(1)
-                                  else:
-                                      ext = doc_url.split('.')[-1].split('?')[0]
-                                      filename = f"{msg_id}_document.{ext}"
-                                  
-                                  filepath = media_dir / filename
-                                  
-                                  with open(filepath, 'wb') as f:
-                                      for chunk in resp.iter_content(chunk_size=8192):
-                                          f.write(chunk)
-                                  
-                                  downloaded_media.append({
-                                      'type': 'document',
-                                      'filename': filename,
-                                      'size': content_length
-                                  })
-                                  print(f"    📎 Downloaded document: {filename} ({content_length/1024:.0f}KB)")
-                      except Exception as e:
-                          print(f"    ❌ Failed to download document: {e}")
-                  
-                  # Create message JSON
                   message_data = {
-                      'id': msg_id,
+                      'message_id': msg_id,
                       'channel': channel_name,
                       'channel_url': channel_url,
-                      'text': text,
+                      'content': text,
                       'timestamp': timestamp,
-                      'media': downloaded_media,
-                      'fetched_at': datetime.now().isoformat()
+                      'photo_url': photo_urls[0] if photo_urls else None,
+                      'photo_count': len(photo_urls),
+                      'video_url': video_url,
+                      'telegram_post_link': telegram_post_link,
+                      'downloaded_media': downloaded_media,
+                      'fetched_at': datetime.now(timezone.utc).astimezone(TEHRAN_TZ).isoformat()
                   }
                   
-                  # Save individual message file
                   msg_file = Path(OUTPUT_DIR) / f"{channel_name}_{msg_id}.json"
                   with open(msg_file, 'w', encoding='utf-8') as f:
                       json.dump(message_data, f, indent=2, ensure_ascii=False)
                   
-                  all_messages.append(message_data)
+                  channel_messages.append(message_data)
+                  new_count += 1
                   print(f"  ✅ Message {msg_id}: {len(text)} chars, {len(downloaded_media)} media")
                   
-                  # Small delay to be respectful
-                  time.sleep(0.5)
+                  time.sleep(REQUEST_DELAY)
               
-              print(f"  Total: {len([m for m in all_messages if m['channel'] == channel_name])} messages")
+              print(f"  Total new: {new_count} messages")
+              return channel_messages
           
-          # Save summary file
+          # ============================================================================
+          # Parallel fetching
+          # ============================================================================
+          
+          all_messages = []
+          
+          with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+              future_to_channel = {
+                  executor.submit(fetch_channel, url): url 
+                  for url in CHANNELS if url
+              }
+              
+              for future in as_completed(future_to_channel):
+                  channel_url = future_to_channel[future]
+                  try:
+                      messages = future.result()
+                      all_messages.extend(messages)
+                  except Exception as e:
+                      print(f"❌ Failed to fetch {channel_url}: {e}")
+          
           summary = {
               'run_id': RUN_ID,
-              'fetched_at': datetime.now().isoformat(),
+              'fetched_at': datetime.now(timezone.utc).astimezone(TEHRAN_TZ).isoformat(),
               'total_messages': len(all_messages),
               'channels': list(set(m['channel'] for m in all_messages))
           }
@@ -255,15 +325,16 @@ jobs:
           with open(Path(OUTPUT_DIR) / 'summary.json', 'w') as f:
               json.dump(summary, f, indent=2)
           
-          print(f"\n📊 Summary: {len(all_messages)} messages from {len(summary['channels'])} channels")
+          print(f"\n{'='*60}")
+          print(f"📊 Summary: {len(all_messages)} new messages from {len(summary['channels'])} channels")
           
-          # Set output
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"message_count={len(all_messages)}\n")
           EOF
         env:
           INPUT_CHANNELS: ${{ github.event.inputs.channels }}
           INPUT_RUN_ID: ${{ github.event.inputs.run_id }}
+          INPUT_HISTORY: ${{ github.event.inputs.history }}
           
       - name: Create temporary branch
         run: |
@@ -273,11 +344,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create orphan branch (no history)
           git checkout --orphan "${BRANCH_NAME}"
           git rm -rf . 2>/dev/null || true
           
-          # Add only the download folder
           git add downloads/
           git commit -m "Telegram fetch ${{ github.event.inputs.run_id }}"
           git push origin "${BRANCH_NAME}"
