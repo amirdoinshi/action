@@ -335,18 +335,17 @@ jobs:
           else
             echo "Single APK mode: keeping the APK file (SAI can install it directly)"
             # Rename versioned APK to package name if it's not already named correctly
-            cd "$OUTPUT_DIR"
-            for f in *.apk; do
-              if [ "$f" != "SAI.apk" ] && [ "$f" != "${{ inputs.package_name }}.apk" ]; then
-                echo "Renaming $f to ${{ inputs.package_name }}.apk"
-                mv "$f" "${{ inputs.package_name }}.apk" 2>/dev/null || echo "APK already has correct name or rename failed"
+            for f in "$OUTPUT_DIR"/*.apk; do
+              BASENAME=$(basename "$f")
+              if [ "$BASENAME" != "SAI.apk" ] && [ "$BASENAME" != "${{ inputs.package_name }}.apk" ]; then
+                echo "Renaming $BASENAME to ${{ inputs.package_name }}.apk"
+                mv "$f" "$OUTPUT_DIR/${{ inputs.package_name }}.apk" 2>/dev/null || echo "APK already has correct name or rename failed"
               fi
             done
           fi
           
           echo "Files after cleanup:"
           ls -la "$OUTPUT_DIR/"
-
       # ── Resolve final file path (CRITICAL FIX) ──
       - name: Resolve final file path
         id: final
