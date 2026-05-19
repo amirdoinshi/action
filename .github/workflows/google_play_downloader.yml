@@ -272,7 +272,7 @@ jobs:
 
           echo "Packaging splits (merge_splits=${{ inputs.merge_splits }}, sai_mode=${{ inputs.sai_mode }})"
           echo "APK count: $APK_COUNT"
-          echo "Contents of $OUTPUT_DIR:"
+          echo "Contents of $OUTPUT_DIR before packaging:"
           ls -la "$OUTPUT_DIR/"
 
           if [ "$APK_COUNT" -gt 1 ]; then
@@ -280,6 +280,11 @@ jobs:
             ZIP_FILE="${PACKAGE}.zip"
             zip -j "$ZIP_FILE" *.apk
             echo "Packaged $APK_COUNT splits → $ZIP_FILE"
+            
+            # Remove the individual split APKs after zipping
+            rm -f *.apk
+            echo "Removed individual split APKs, keeping only $ZIP_FILE"
+            
             echo "final_file=$OUTPUT_DIR/$ZIP_FILE" >> "$GITHUB_OUTPUT"
             echo "final_name=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           else
@@ -309,6 +314,18 @@ jobs:
             curl -fsSL -o "$OUTPUT_DIR/SAI.apk" "$SAI_URL"
             echo "SAI APK: $(du -h "$OUTPUT_DIR/SAI.apk" | cut -f1)"
           fi
+          
+      # Clean up: In SAI mode, we only want the ZIP and SAI.apk, not the raw splits
+      - name: Clean up raw splits in SAI mode
+        if: inputs.sai_mode == true
+        run: |
+          OUTPUT_DIR="${{ inputs.output_folder }}"
+          
+          # Remove any remaining .apk files that are NOT SAI.apk
+          find "$OUTPUT_DIR" -maxdepth 1 -name "*.apk" ! -name "SAI.apk" -type f -delete
+          
+          echo "Files after cleanup:"
+          ls -la "$OUTPUT_DIR/"
 
       # ── Resolve final file path (CRITICAL FIX) ──
       - name: Resolve final file path
@@ -416,7 +433,7 @@ jobs:
         if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config.user.email "github-actions[bot]@users.noreply.github.com"
           git add "${{ inputs.output_folder }}/"
           git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
           for push_attempt in 1 2 3; do
