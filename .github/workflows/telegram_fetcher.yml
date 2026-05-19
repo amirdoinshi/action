@@ -50,7 +50,7 @@ jobs:
           pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
           
-      - name: Fetch Telegram messages and media
+      - name: Fetch Telegram RAW data (no formatting)
         run: |
           python3 << 'EOF'
           import os
@@ -100,51 +100,7 @@ jobs:
           RE_TIME = re.compile(r'(\d{1,2}:\d{2})')
           
           # ============================================================================
-          # HTML to Markdown conversion (EXACTLY like tele2matrix)
-          # ============================================================================
-          
-          INLINE_FORMAT = {
-              'b': ('**', '**'),
-              'strong': ('**', '**'),
-              'i': ('*', '*'),
-              'em': ('*', '*'),
-              'code': ('`', '`'),
-          }
-          
-          def process_element(content) -> str:
-              if content.name == 'a':
-                  text = content.get_text(strip=True)
-                  href = content.get('href', '')
-                  return f'[{text}]({href})'
-              if content.name == 'br':
-                  return '  \n'
-              if content.name == 'pre':
-                  code = content.get_text(separator='\n', strip=True)
-                  return f'```\n{code}\n```'
-              if content.name in INLINE_FORMAT:
-                  open_md, close_md = INLINE_FORMAT[content.name]
-                  return f'{open_md}{content.get_text(strip=True)}{close_md}'
-              if content.name == 'i' and 'emoji' in (content.get('class') or []):
-                  return content.get_text(strip=True)
-              if content.name == 'blockquote':
-                  parts = [process_element(child) for child in content.children]
-                  inner = ''.join(parts)
-                  lines = inner.split('  \n')
-                  quoted = '\n'.join(f'> {line}' if line.strip() else '>' for line in lines)
-                  return '\n' + quoted + '\n'
-              if content.string:
-                  return content.string.strip()
-              return ''
-          
-          def html_to_markdown(html_content: str) -> str:
-              if not html_content:
-                  return ''
-              soup = BeautifulSoup(html_content, 'html.parser')
-              parts = [process_element(child) for child in soup.children]
-              return ''.join(parts)
-          
-          # ============================================================================
-          # Extraction functions
+          # Extraction functions - NO formatting, just raw data
           # ============================================================================
           
           def extract_message_id(wrap) -> str | None:
@@ -174,18 +130,22 @@ jobs:
                   pass
               return None
           
-          def extract_html_content(bubble) -> str:
+          def extract_raw_html(bubble) -> str:
+              """Extract RAW HTML content - NO conversion, just the HTML string"""
+              # Strip reactions and footer
               for cls in ('tgme_widget_message_reactions', 'tgme_widget_message_footer'):
                   el = bubble.find('div', class_=cls)
                   if el:
                       el.decompose()
               
+              # Handle reply quotes
               reply_html = ''
               reply_el = bubble.find('a', class_='tgme_widget_message_reply')
               if reply_el:
                   reply_html = str(reply_el)
                   reply_el.decompose()
               
+              # Get main content
               grouped = bubble.find('div', class_='tgme_widget_message_grouped_wrap')
               if grouped:
                   text_el = None
@@ -224,7 +184,7 @@ jobs:
               return False, 0
           
           # ============================================================================
-          # Fetch channel
+          # Fetch channel - NO formatting, just raw data
           # ============================================================================
           
           def fetch_channel(channel_url: str) -> list[dict]:
@@ -270,8 +230,7 @@ jobs:
                       break
                   
                   timestamp = extract_timestamp(bubble)
-                  html_content = extract_html_content(bubble)
-                  markdown_content = html_to_markdown(html_content)
+                  raw_html = extract_raw_html(bubble)  # RAW HTML, no conversion
                   
                   # Extract media
                   photo_urls = []
@@ -314,11 +273,12 @@ jobs:
                           downloaded_media.append({'type': 'video', 'filename': filename, 'size': size})
                           print(f"    🎥 Downloaded video")
                   
+                  # Store RAW data (bot will do formatting)
                   message_data = {
                       'message_id': msg_id,
                       'channel': channel_name,
                       'channel_url': channel_url,
-                      'content': markdown_content,
+                      'raw_html': raw_html,  # RAW HTML - bot will convert to markdown
                       'timestamp': timestamp,
                       'photo_url': photo_urls[0] if photo_urls else None,
                       'photo_count': len(photo_urls),
