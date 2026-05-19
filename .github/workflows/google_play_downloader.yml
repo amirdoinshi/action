@@ -353,53 +353,36 @@ jobs:
       - name: Resolve final file path
         id: final
         run: |
-          # Determine which mode we're in
-          MERGE_MODE="${{ inputs.merge_splits != false && inputs.sai_mode != true }}"
-          SAI_MODE="${{ inputs.sai_mode == true }}"
+          OUTPUT_DIR="${{ inputs.output_folder }}"
           
-          echo "Merge mode: $MERGE_MODE"
-          echo "SAI mode: $SAI_MODE"
+          echo "Resolving final file from $OUTPUT_DIR"
+          echo "Contents of $OUTPUT_DIR:"
+          ls -la "$OUTPUT_DIR/"
           
-          # Get the file path from the appropriate step
-          if [ "$MERGE_MODE" = "true" ]; then
-            FINAL_PATH="${{ steps.merge.outputs.final_file }}"
-            FINAL_NAME="${{ steps.merge.outputs.final_name }}"
-            echo "Using merge mode output"
+          # Scan for the actual files present (more reliable than step outputs)
+          APK_FILES=$(ls -1 "$OUTPUT_DIR"/*.apk 2>/dev/null | grep -v "SAI.apk" || true)
+          ZIP_FILES=$(ls -1 "$OUTPUT_DIR"/*.zip 2>/dev/null || true)
+          
+          if [ -n "$APK_FILES" ]; then
+            # Found APK files (excluding SAI.apk)
+            FINAL_PATH=$(echo "$APK_FILES" | head -n1)
+            FINAL_NAME=$(basename "$FINAL_PATH")
+            echo "Found APK: $FINAL_NAME"
+          elif [ -n "$ZIP_FILES" ]; then
+            # Found ZIP files
+            FINAL_PATH=$(echo "$ZIP_FILES" | head -n1)
+            FINAL_NAME=$(basename "$FINAL_PATH")
+            echo "Found ZIP: $FINAL_NAME"
           else
-            FINAL_PATH="${{ steps.package_zip.outputs.final_file }}"
-            FINAL_NAME="${{ steps.package_zip.outputs.final_name }}"
-            echo "Using package_zip mode output"
-          fi
-          
-          # Debug: show what we got
-          echo "Raw FINAL_PATH: '$FINAL_PATH'"
-          echo "Raw FINAL_NAME: '$FINAL_NAME'"
-          
-          # If still empty, try to find any file in output folder
-          if [ -z "$FINAL_PATH" ]; then
-            echo "⚠️ No file path from workflow steps, scanning output folder..."
-            OUTPUT_DIR="${{ inputs.output_folder }}"
-            
-            # Find any APK or ZIP file in output folder
-            FOUND_FILE=$(ls -1 "$OUTPUT_DIR"/*.{apk,zip} 2>/dev/null | head -n1 || echo "")
-            
-            if [ -n "$FOUND_FILE" ]; then
-              FINAL_PATH="$FOUND_FILE"
-              FINAL_NAME=$(basename "$FOUND_FILE")
-              echo "Found file automatically: $FINAL_NAME"
-            else
-              echo "❌ Error: No file found in $OUTPUT_DIR!"
-              echo "Contents of output folder:"
-              ls -la "$OUTPUT_DIR/"
-              exit 1
-            fi
+            echo "❌ Error: No APK or ZIP files found in $OUTPUT_DIR!"
+            echo "Available files:"
+            ls -la "$OUTPUT_DIR/"
+            exit 1
           fi
           
           # Validate file exists
           if [ ! -f "$FINAL_PATH" ]; then
             echo "❌ Error: File does not exist: $FINAL_PATH"
-            echo "Available files in ${{ inputs.output_folder }}:"
-            ls -la "${{ inputs.output_folder }}"
             exit 1
           fi
           
@@ -409,7 +392,6 @@ jobs:
           
           FILE_SIZE=$(du -h "$FINAL_PATH" | cut -f1)
           echo "✅ Resolved: $FINAL_NAME ($FILE_SIZE)"
-
       # ── Split for git storage (repository / temp_branch only) ─────────────
       - name: Split file for git storage
         if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
