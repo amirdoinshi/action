@@ -344,11 +344,30 @@ jobs:
           fi
           
           echo "Files after cleanup:"
-          ls -la "$OUTPUT_DIR/"|
+          ls -la "$OUTPUT_DIR/"|      # Clean up: In SAI mode, we only want the ZIP and SAI.apk, not the raw splits
+      - name: Clean up raw splits in SAI mode
+        if: inputs.sai_mode == true
+        run: |
           OUTPUT_DIR="${{ inputs.output_folder }}"
+          APK_COUNT="${{ steps.download.outputs.apk_count }}"
           
-          # Remove any remaining .apk files that are NOT SAI.apk
-          find "$OUTPUT_DIR" -maxdepth 1 -name "*.apk" ! -name "SAI.apk" -type f -delete
+          # Only delete split APKs when there are multiple files (they were zipped)
+          # For single APK, keep it (SAI can install single APKs directly)
+          if [ "$APK_COUNT" -gt 1 ]; then
+            # Remove any remaining .apk files that are NOT SAI.apk
+            find "$OUTPUT_DIR" -maxdepth 1 -name "*.apk" ! -name "SAI.apk" -type f -delete
+            echo "Removed split APKs, keeping only ZIP and SAI.apk"
+          else
+            echo "Single APK mode - keeping the APK file"
+            # Ensure the APK has the correct name (not the versioned one)
+            cd "$OUTPUT_DIR"
+            # Rename versioned APK to package name if needed
+            for f in *.apk; do
+              if [ "$f" != "SAI.apk" ]; then
+                mv "$f" "${{ inputs.package_name }}.apk" 2>/dev/null || true
+              fi
+            done
+          fi
           
           echo "Files after cleanup:"
           ls -la "$OUTPUT_DIR/"
