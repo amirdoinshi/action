@@ -340,6 +340,9 @@ jobs:
               if [ "$BASENAME" != "SAI.apk" ] && [ "$BASENAME" != "${{ inputs.package_name }}.apk" ]; then
                 echo "Renaming $BASENAME to ${{ inputs.package_name }}.apk"
                 mv "$f" "$OUTPUT_DIR/${{ inputs.package_name }}.apk" 2>/dev/null || echo "APK already has correct name or rename failed"
+                # Update GitHub Actions output to reflect the new filename
+                echo "final_file=$OUTPUT_DIR/${{ inputs.package_name }}.apk" >> "$GITHUB_OUTPUT"
+                echo "final_name=${{ inputs.package_name }}.apk" >> "$GITHUB_OUTPUT"
               fi
             done
           fi
