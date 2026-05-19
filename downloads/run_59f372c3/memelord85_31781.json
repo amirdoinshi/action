@@ -1,0 +1,35 @@
+{
+  "id": "31781",
+  "channel": "memelord85",
+  "channel_url": "https://t.me/s/memelord85",
+  "text": "",
+  "timestamp": "2026-05-18T18:41:45+00:00",
+  "media": [
+    {
+      "type": "photo",
+      "filename": "31781_photo_0.jpg",
+      "size": 114284
+    },
+    {
+      "type": "photo",
+      "filename": "31781_photo_1.jpg",
+      "size": 124655
+    },
+    {
+      "type": "photo",
+      "filename": "31781_photo_2.jpg",
+      "size": 135465
+    },
+    {
+      "type": "photo",
+      "filename": "31781_photo_3.jpg",
+      "size": 119827
+    },
+    {
+      "type": "photo",
+      "filename": "31781_photo_4.jpg",
+      "size": 136091
+    }
+  ],
+  "fetched_at": "2026-05-19T06:13:26.429593"
+}
