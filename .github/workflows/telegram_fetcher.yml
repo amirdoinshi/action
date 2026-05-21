@@ -58,6 +58,11 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local http.postBuffer 524288000
+          git config --local pack.window 1
+          git config --local pack.depth 0
+          git config --local core.compression 0
+          git config --local pack.compression 0
 
           git checkout --orphan "$BRANCH"
           git rm -rf . 2>/dev/null || true
