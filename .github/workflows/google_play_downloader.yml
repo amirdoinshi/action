@@ -422,6 +422,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local http.postBuffer 524288000
+          git config --local pack.window 1
+          git config --local pack.depth 0
+          git config --local core.compression 0
+          git config --local pack.compression 0
           git add "${{ inputs.output_folder }}/"
           git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
           for push_attempt in 1 2 3; do
@@ -438,6 +443,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local http.postBuffer 524288000
+          git config --local pack.window 1
+          git config --local pack.depth 0
+          git config --local core.compression 0
+          git config --local pack.compression 0
           git add "${{ inputs.output_folder }}/"
           git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
           for push_attempt in 1 2 3; do
