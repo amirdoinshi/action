@@ -386,7 +386,6 @@ jobs:
             --write-info-json \
             --extractor-args "youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv" \
             --concurrent-fragments "${FRAGMENTS}" \
-            --ignore-errors \
             $FORMAT_ARGS \
             $SECTION_ARGS \
             $SUBTITLE_ARGS \
@@ -398,7 +397,23 @@ jobs:
             $COOKIE_ARGS \
             -o "$OUTPUT_FOLDER/%(title)s [%(id)s].%(ext)s" \
             $EXTRA_ARGS \
-            "$URL"
+            "$URL" || {
+            exit_code=$?
+    
+            # Check if any video files were successfully downloaded
+            video_count=$(find "$OUTPUT_FOLDER" -name "*.mkv" -o -name "*.mp4" -o -name "*.webm" 2>/dev/null | wc -l)
+    
+            if [ "$video_count" -gt 0 ]; then
+                echo "✅ Download completed with $video_count videos (some may have failed due to private/unavailable videos)"
+                echo "⚠️ Exit code was $exit_code but continuing because videos were downloaded"
+                exit 0
+            else
+
+                echo "❌ CRITICAL: No videos were downloaded. Exit code: $exit_code"
+                echo "This indicates a fatal error, not just skipped private videos"
+            exit $exit_code
+           fi
+        }
         env:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
