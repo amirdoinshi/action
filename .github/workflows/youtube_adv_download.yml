@@ -403,17 +403,17 @@ jobs:
           
           yt_exit_code=$?
           
-          # Check if any video files were successfully downloaded
-          video_count=$(find "$OUTPUT_FOLDER" -name "*.mkv" -o -name "*.mp4" -o -name "*.webm" 2>/dev/null | wc -l)
+          # Check for any video OR audio files in the output folder
+          video_count=$(find "$OUTPUT_FOLDER" -type f \( -name "*.mkv" -o -name "*.mp4" -o -name "*.webm" -o -name "*.mp3" -o -name "*.m4a" -o -name "*.opus" -o -name "*.ogg" -o -name "*.aac" \) 2>/dev/null | wc -l)
           
           if [ "$video_count" -gt 0 ]; then
-            echo "✅ Download completed with $video_count videos (some may have failed due to private/unavailable videos)"
+            echo "✅ Download completed with $video_count files (some may have failed due to private/unavailable videos)"
             if [ $yt_exit_code -ne 0 ]; then
-              echo "⚠️ yt-dlp exit code was $yt_exit_code but continuing because videos were downloaded"
+              echo "⚠️ yt-dlp exit code was $yt_exit_code but continuing because files were downloaded"
             fi
             exit 0
           else
-            echo "❌ CRITICAL: No videos were downloaded. yt-dlp exit code: $yt_exit_code"
+            echo "❌ CRITICAL: No files were downloaded. yt-dlp exit code: $yt_exit_code"
             echo "This indicates a fatal error, not just skipped private videos"
             exit 1
           fi
