@@ -386,6 +386,7 @@ jobs:
             --write-info-json \
             --extractor-args "youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv" \
             --concurrent-fragments "${FRAGMENTS}" \
+            --ignore-errors \
             $FORMAT_ARGS \
             $SECTION_ARGS \
             $SUBTITLE_ARGS \
