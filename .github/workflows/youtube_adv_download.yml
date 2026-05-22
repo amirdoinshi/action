@@ -378,6 +378,8 @@ jobs:
           # Verify PO Token server is reachable
           curl -s http://localhost:4416/ping && echo "✅ PO Token server ready" || echo "❌ PO Token server not responding"
 
+          set +e  # Temporarily disable exit on error
+          
           yt-dlp \
             --ffmpeg-location /usr/local/bin \
             --js-runtimes node \
@@ -397,23 +399,26 @@ jobs:
             $COOKIE_ARGS \
             -o "$OUTPUT_FOLDER/%(title)s [%(id)s].%(ext)s" \
             $EXTRA_ARGS \
-            "$URL" || {
-            exit_code=$?
-    
-            # Check if any video files were successfully downloaded
-            video_count=$(find "$OUTPUT_FOLDER" -name "*.mkv" -o -name "*.mp4" -o -name "*.webm" 2>/dev/null | wc -l)
-    
-            if [ "$video_count" -gt 0 ]; then
-                echo "✅ Download completed with $video_count videos (some may have failed due to private/unavailable videos)"
-                echo "⚠️ Exit code was $exit_code but continuing because videos were downloaded"
-                exit 0
-            else
-
-                echo "❌ CRITICAL: No videos were downloaded. Exit code: $exit_code"
-                echo "This indicates a fatal error, not just skipped private videos"
-            exit $exit_code
-           fi
-        }
+            "$URL"
+          
+          yt_exit_code=$?
+          
+          # Check if any video files were successfully downloaded
+          video_count=$(find "$OUTPUT_FOLDER" -name "*.mkv" -o -name "*.mp4" -o -name "*.webm" 2>/dev/null | wc -l)
+          
+          if [ "$video_count" -gt 0 ]; then
+            echo "✅ Download completed with $video_count videos (some may have failed due to private/unavailable videos)"
+            if [ $yt_exit_code -ne 0 ]; then
+              echo "⚠️ yt-dlp exit code was $yt_exit_code but continuing because videos were downloaded"
+            fi
+            exit 0
+          else
+            echo "❌ CRITICAL: No videos were downloaded. yt-dlp exit code: $yt_exit_code"
+            echo "This indicates a fatal error, not just skipped private videos"
+            exit 1
+          fi
+          
+          set -e  # Re-enable exit on error
         env:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
