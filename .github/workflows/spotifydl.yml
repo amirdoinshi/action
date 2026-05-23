@@ -93,10 +93,11 @@ jobs:
         if: steps.cache-docker.outputs.cache-hit == 'true'
         run: docker load --input /tmp/downtify-img.tar
 
+      # ── KEY FIX: cookies are volume-mounted at startup, not docker cp'd after ──
       - name: Start downtify container
         id: start-downtify
         run: |
-          # Write cookies from inline input or YT_COOKIES secret
+          # ── Resolve cookies: inline input takes priority, then YT_COOKIES secret ──
           if [ -n "$INPUT_COOKIES" ]; then
             printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
             echo "Using inline cookies ($(wc -l < /tmp/cookies.txt) lines)"
@@ -104,36 +105,42 @@ jobs:
             printf '%s' "$SECRET_YT_COOKIES" > /tmp/cookies.txt
             echo "Using YT_COOKIES secret ($(wc -l < /tmp/cookies.txt) lines)"
           else
-            echo "No cookies provided - downloads may fail for bot-protected content"
+            echo "::warning::No cookies provided — downloads will likely fail on YouTube"
           fi
 
-          # Build YTDL_OPTIONS before docker run so the JSON is set correctly at startup.
-          # yt-dlp config files are ignored when called as a Python library (which downtify does),
-          # so cookiefile MUST be in ydl_opts via YTDL_OPTIONS — there is no other way.
+          # ── Build YTDL_OPTIONS and optional volume mount flag ──
+          # Cookies are mounted into /cookies/cookies.txt so the path is stable
+          # and guaranteed to exist before yt-dlp ever reads YTDL_OPTIONS.
+          # pot_provider=bgutil adds PO Token support required by YouTube in 2026.
           if [ -f /tmp/cookies.txt ]; then
-            YTDL_OPTS='{"concurrent_fragments":16,"cookiefile":"/tmp/cookies.txt"}'
+            YTDL_OPTS='{"concurrent_fragments":16,"cookiefile":"/cookies/cookies.txt","extractor_args":{"youtube":{"po_token":["web+${pot}"]}}}'
+            COOKIE_MOUNT="-v /tmp/cookies.txt:/cookies/cookies.txt:ro"
+            echo "✅ Cookies + PO Token mount enabled"
           else
             YTDL_OPTS='{"concurrent_fragments":16}'
+            COOKIE_MOUNT=""
           fi
 
           docker run -d \
             --name downtify \
             -p 8000:8000 \
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
+            $COOKIE_MOUNT \
             -e "YTDL_OPTIONS=$YTDL_OPTS" \
             ghcr.io/henriquesebastiao/downtify:latest
 
+          # ── Wait for the web server to become ready ──
           echo "Waiting for web server..."
           READY=0
           for i in {1..30}; do
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               --connect-timeout 3 --max-time 5 http://localhost:8000 2>/dev/null || echo "000")
             if [[ "$HTTP_CODE" =~ ^[23] ]]; then
-              echo "Server ready (HTTP $HTTP_CODE)"
+              echo "✅ Server ready (HTTP $HTTP_CODE)"
               READY=1
               break
             fi
-            echo "  attempt $i/30 - HTTP $HTTP_CODE - retrying..."
+            echo "  attempt $i/30 – HTTP $HTTP_CODE – retrying..."
             sleep 2
           done
           if [ $READY -eq 0 ]; then
@@ -142,20 +149,19 @@ jobs:
             exit 1
           fi
 
-          # Copy cookies into the container after it starts.
-          # YTDL_OPTIONS already has the cookiefile path set — this just places the actual file there.
-          if [ -f /tmp/cookies.txt ]; then
-            docker cp /tmp/cookies.txt downtify:/tmp/cookies.txt
-            echo "Cookies copied into container ($(wc -l < /tmp/cookies.txt) lines)"
-            echo "YTDL_OPTIONS: $(docker exec downtify sh -c 'echo $YTDL_OPTIONS')"
-          else
-            echo "::warning::No cookies - YT_COOKIES secret may not be set"
-          fi
+          # ── Install PO Token provider (bgutil) ──
+          # This is what lets yt-dlp generate a fresh Proof-of-Origin token,
+          # which YouTube now requires alongside cookies on datacenter IPs.
+          echo "Installing PO Token provider (bgutil)..."
+          docker exec downtify pip install bgutil-yt-dlp-pot-provider --quiet \
+            || echo "::warning::Could not install bgutil POT provider — bot detection may still trigger"
 
-          echo "Upgrading yt-dlp inside container"
+          # ── Upgrade yt-dlp to latest to get newest bot-detection bypasses ──
+          echo "Upgrading yt-dlp..."
           docker exec downtify pip install --upgrade yt-dlp --quiet
 
-          echo "Applying format and bitrate settings"
+          # ── Apply format and bitrate settings ──
+          echo "Applying format and bitrate settings..."
           curl -s -o /dev/null --connect-timeout 10 --max-time 15 \
             -X POST http://localhost:8000/api/settings/update \
             -H "Content-Type: application/json" \
@@ -176,14 +182,13 @@ jobs:
           fi
 
       # ----------------------------------------------
-      # SINGLE TRACK – using query parameter (FIXED)
+      # SINGLE TRACK – using query parameter
       # ----------------------------------------------
       - name: Single track (POST /api/download/url)
         if: steps.detect.outputs.is_playlist == 'false'
         run: |
           ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
           echo "Downloading single track..."
-          # /api/download/url blocks until complete; url is a query parameter
           HTTP_CODE=$(curl -s -o /tmp/dl_response.json -w "%{http_code}" \
             --connect-timeout 10 --max-time 600 \
             -X POST "http://localhost:8000/api/download/url?url=${ENCODED_URL}")
@@ -193,8 +198,9 @@ jobs:
             docker logs downtify --tail 50
             exit 1
           fi
-          COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
-          echo "Download complete - $COUNT file(s)"
+          COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
+            \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
+          echo "Download complete – $COUNT file(s)"
           if [ "$COUNT" -eq 0 ]; then
             echo "::error::API succeeded but no audio file found in output folder"
             docker logs downtify --tail 50
@@ -209,7 +215,7 @@ jobs:
         id: resolve
         run: |
           ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
-          echo " Resolving playlist/album metadata from Spotify embed..."
+          echo "Resolving playlist/album metadata from Spotify embed..."
           curl -s "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
           cat /tmp/tracks.json
           TRACK_COUNT=$(jq 'if type=="array" then length else 1 end' /tmp/tracks.json)
@@ -222,7 +228,6 @@ jobs:
         if: steps.detect.outputs.is_playlist == 'true'
         run: |
           echo "Submitting batch download..."
-          # Build request: songs array from resolve step + playlist_url for folder/M3U naming
           BATCH_BODY=$(jq -n \
             --argjson songs "$(jq 'if type=="array" then . else [.] end' /tmp/tracks.json)" \
             --arg playlist_url "${{ github.event.inputs.spotify_url }}" \
@@ -245,22 +250,23 @@ jobs:
           PREV_COUNT=0
           STABLE=0
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
+            COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
+              \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
             if [ $COUNT -eq $EXPECTED ]; then
-              echo " All $EXPECTED tracks downloaded"
+              echo "✅ All $EXPECTED tracks downloaded"
               break
             fi
             if [ $COUNT -gt 0 ] && [ $COUNT -eq $PREV_COUNT ]; then
               STABLE=$((STABLE + 1))
               if [ $STABLE -ge 5 ]; then
-                echo " No new files for 50 seconds – assuming download finished with $COUNT/$EXPECTED tracks"
+                echo "⚠️ No new files for 50s – assuming finished with $COUNT/$EXPECTED tracks"
                 break
               fi
             else
               STABLE=0
             fi
             PREV_COUNT=$COUNT
-            echo " Downloaded $COUNT / $EXPECTED – waiting..."
+            echo "  Downloaded $COUNT / $EXPECTED – waiting..."
             sleep 10
             ELAPSED=$((ELAPSED + 10))
           done
@@ -271,6 +277,26 @@ jobs:
           fi
 
       # ----------------------------------------------
+      # DEBUG – runs always, invaluable when things fail
+      # ----------------------------------------------
+      - name: Debug cookies & yt-dlp
+        if: always()
+        run: |
+          echo "=== Cookie mount check ==="
+          docker exec downtify ls -la /cookies/ 2>/dev/null || echo "No /cookies mount (no cookies were provided)"
+          echo "=== YTDL_OPTIONS inside container ==="
+          docker exec downtify sh -c 'echo $YTDL_OPTIONS'
+          echo "=== yt-dlp version ==="
+          docker exec downtify yt-dlp --version 2>/dev/null || echo "Container already stopped"
+          echo "=== Quick title probe (no download) ==="
+          docker exec downtify yt-dlp \
+            --cookies /cookies/cookies.txt \
+            --print title \
+            "https://music.youtube.com/watch?v=UooqxWn0GBY" 2>&1 || true
+          echo "=== Last 80 container log lines ==="
+          docker logs downtify --tail 80 2>/dev/null || true
+
+      # ----------------------------------------------
       # POST-PROCESSING
       # ----------------------------------------------
       - name: Apply custom filename (single file only)
@@ -279,10 +305,11 @@ jobs:
           CUSTOM="${{ github.event.inputs.custom_filename }}"
           EXT="${{ github.event.inputs.output_format }}"
           OUTPUT="${{ github.event.inputs.output_folder }}"
-          OLD=$(find "$OUTPUT" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | head -1)
+          OLD=$(find "$OUTPUT" -type f \
+            \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | head -1)
           if [ -f "$OLD" ]; then
             mv "$OLD" "$OUTPUT/${CUSTOM}.${EXT}"
-            echo " Renamed to ${CUSTOM}.${EXT}"
+            echo "✅ Renamed to ${CUSTOM}.${EXT}"
           fi
 
       - name: Stop container
@@ -308,7 +335,7 @@ jobs:
             [ -f "$f" ] || continue
             size=$(stat -c%s "$f")
             if [ $size -gt $THRESH_BYTES ]; then
-              echo " Splitting $(basename "$f") into ${THRESH_MB}MB parts"
+              echo "Splitting $(basename "$f") into ${THRESH_MB}MB parts"
               split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
               rm "$f"
             fi
@@ -323,7 +350,7 @@ jobs:
             [ -f "$f" ] || continue
             size=$(stat -c%s "$f")
             if [ $size -gt $LIMIT ]; then
-              echo " Splitting $(basename "$f") into 2GB parts"
+              echo "Splitting $(basename "$f") into 2GB parts"
               split -b 2048m -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
               rm "$f"
             fi
