@@ -97,8 +97,6 @@ jobs:
         id: start-downtify
         run: |
           # Write cookies from inline input or YT_COOKIES secret
-          COOKIE_MOUNT=""
-          COOKIE_YTDL=""
           if [ -n "$INPUT_COOKIES" ]; then
             printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
             echo "Using inline cookies ($(wc -l < /tmp/cookies.txt) lines)"
@@ -108,17 +106,12 @@ jobs:
           else
             echo "No cookies provided - downloads may fail for bot-protected content"
           fi
-          if [ -f /tmp/cookies.txt ]; then
-            COOKIE_MOUNT="-v /tmp/cookies.txt:/cookies.txt:ro"
-            COOKIE_YTDL=',"cookiefile":"/cookies.txt"'
-          fi
 
           docker run -d \
             --name downtify \
             -p 8000:8000 \
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
-            $COOKIE_MOUNT \
-            -e "YTDL_OPTIONS={\"concurrent_fragments\":16${COOKIE_YTDL}}" \
+            -e YTDL_OPTIONS='{"concurrent_fragments":16}' \
             ghcr.io/henriquesebastiao/downtify:latest
 
           echo "Waiting for web server..."
@@ -138,6 +131,14 @@ jobs:
             echo "::error::Downtify never became ready after 60s"
             docker logs downtify --tail 50
             exit 1
+          fi
+
+          # Inject cookies into the container via yt-dlp config file
+          # (more reliable than YTDL_OPTIONS env var parsing)
+          if [ -f /tmp/cookies.txt ]; then
+            docker cp /tmp/cookies.txt downtify:/tmp/cookies.txt
+            docker exec downtify sh -c "mkdir -p /root/.config/yt-dlp && printf '--cookies /tmp/cookies.txt\n' > /root/.config/yt-dlp/config"
+            echo "Cookies injected into container ($(wc -l < /tmp/cookies.txt) lines)"
           fi
 
           echo "Upgrading yt-dlp inside container"
