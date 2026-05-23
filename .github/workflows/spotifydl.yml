@@ -1,59 +1,74 @@
-name: Spotify Downloader
+name: Spotify Downloader (Hybrid)
+
+# Strategy:
+#   1. Start bgutil PO Token server on runner host (same as youtube_adv_download.yml)
+#   2. Start Downtify container briefly to resolve Spotify → YouTube URLs + metadata
+#   3. Stop Downtify — all downloading uses native yt-dlp on the runner host
+#   4. mutagen injects Spotify metadata (artist, album, cover art, track #, etc.)
 
 on:
   workflow_dispatch:
     inputs:
       spotify_url:
-        description: 'Spotify URL (track, album, playlist)'
+        description: 'Spotify URL (track, album, or playlist)'
         required: true
         type: string
+
       output_format:
         description: 'Audio format'
         required: false
         type: choice
-        options: ['mp3', 'flac', 'm4a', 'ogg', 'opus']
+        options: ['mp3', 'flac', 'm4a', 'opus']
         default: 'mp3'
+
       audio_quality:
-        description: 'Bitrate (kbps) – MP3 only'
+        description: 'Bitrate (kbps) — MP3/Opus only'
         required: false
         type: choice
         options: ['320', '256', '192', '128']
         default: '320'
-      max_part_mb:
-        description: 'Split files larger than (MB, 0 = no split)'
-        required: false
-        type: number
-        default: 90
+
       output_folder:
         description: 'Output folder (relative to repo root)'
         required: false
         type: string
         default: 'downloads'
+
       custom_filename:
-        description: 'Custom filename (only for a single track)'
+        description: 'Custom filename override (single track only, no extension)'
         required: false
         type: string
         default: ''
+
       upload_method:
         description: 'Upload method'
         required: false
         type: choice
         options: ['repository', 'release', 'temp_branch']
         default: 'repository'
+
       release_tag:
-        description: 'Release tag (for release method)'
+        description: 'Release tag (upload_method = release only)'
         required: false
         type: string
         default: ''
+
       branch_name:
-        description: 'Temp branch name (for temp_branch)'
+        description: 'Temp branch name (upload_method = temp_branch only)'
         required: false
         type: string
         default: ''
+
+      max_part_mb:
+        description: 'Split files larger than N MB (0 = no split)'
+        required: false
+        type: number
+        default: 90
+
       cookies:
         description: |
-          YouTube cookies (Netscape format) to bypass bot-detection.
-          Safer alternative: store as a repo secret named YT_COOKIES — used automatically.
+          YouTube cookies (Netscape format) to bypass bot detection.
+          Safer: store as repo secret YT_COOKIES — used automatically.
         required: false
         type: string
         default: ''
@@ -62,11 +77,14 @@ permissions:
   contents: write
 
 jobs:
-  spotify-download:
+  spotify-hybrid-download:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
+      # ──────────────────────────────────────────────
+      # CHECKOUT
+      # ──────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
@@ -82,27 +100,67 @@ jobs:
       - name: Create output directory
         run: mkdir -p "${{ github.event.inputs.output_folder }}"
 
-      - name: Cache npm (bgutil PO Token server)
+      # ──────────────────────────────────────────────
+      # CACHES
+      # ──────────────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-ytdlp-mutagen
+
+      - name: Cache npm (bgutil)
         uses: actions/cache@v4
         with:
           path: ~/.npm
           key: ${{ runner.os }}-npm-bgutil-v1.3.1
 
-      - name: Cache Docker image
+      - name: Cache ffmpeg static build
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
+          key: ffmpeg-static-7.1
+
+      - name: Cache Downtify Docker image
         id: cache-docker
         uses: actions/cache@v4
         with:
           path: /tmp/downtify-img.tar
           key: ${{ runner.os }}-downtify-latest
 
-      - name: Load Docker image from cache
+      - name: Load Downtify image from cache
         if: steps.cache-docker.outputs.cache-hit == 'true'
         run: docker load --input /tmp/downtify-img.tar
 
-      # ── Run bgutil PO Token server on the runner host ──
-      # The pip plugin (installed inside the container) talks to this server via
-      # the Docker bridge IP (172.17.0.1). This is exactly how the working
-      # youtube_adv_download workflow generates real PO Tokens.
+      # ──────────────────────────────────────────────
+      # INSTALL TOOLS
+      # ──────────────────────────────────────────────
+      - name: Install ffmpeg (static build, fastest)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+            -o /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+          sudo cp /tmp/ffmpeg-*-static/ffmpeg /usr/local/bin/
+          sudo cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
+          ffprobe -version | head -1
+
+      - name: Install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: jq nodejs npm curl
+          version: 1.0
+
+      - name: Install Python tools
+        run: pip install -q -U "yt-dlp[default]" mutagen requests
+
+      # ──────────────────────────────────────────────
+      # bgutil PO TOKEN SERVER (runs on host)
+      # yt-dlp on the host talks to localhost:4416
+      # ──────────────────────────────────────────────
       - name: Build & start bgutil PO Token server
         run: |
           rm -rf /tmp/bgutil
@@ -111,331 +169,462 @@ jobs:
             /tmp/bgutil
           cd /tmp/bgutil/server && npm ci --prefer-offline && npx tsc
           node /tmp/bgutil/server/build/main.js &
-          sleep 5
+          sleep 6
           curl -s http://localhost:4416/ping \
             && echo "✅ PO Token server ready" \
             || echo "::warning::PO Token server not responding on :4416"
 
-      # ── KEY FIX: volume-mount cookies (writable) + restart after pip so plugins load ──
-      - name: Start downtify container
-        id: start-downtify
+      - name: Install bgutil yt-dlp plugin on host
+        run: pip install -q bgutil-yt-dlp-pot-provider
+
+      # ──────────────────────────────────────────────
+      # RESOLVE: Spotify → YouTube URLs + metadata
+      # Downtify is ONLY used for this step.
+      # ──────────────────────────────────────────────
+      - name: Start Downtify (resolver only)
         run: |
-          # ── Resolve cookies: inline input takes priority, then YT_COOKIES secret ──
-          if [ -n "$INPUT_COOKIES" ]; then
-            printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
-            echo "Using inline cookies ($(wc -l < /tmp/cookies.txt) lines)"
-          elif [ -n "$SECRET_YT_COOKIES" ]; then
-            printf '%s' "$SECRET_YT_COOKIES" > /tmp/cookies.txt
-            echo "Using YT_COOKIES secret ($(wc -l < /tmp/cookies.txt) lines)"
-          else
-            echo "::warning::No cookies provided — downloads will likely fail on YouTube"
-          fi
-
-          # ── Build YTDL_OPTIONS ──
-          # - cookiefile: volume-mounted path (writable so yt-dlp can save cookie updates)
-          # - extractor_args: matches the working youtube_adv_download workflow exactly:
-          #     player_client — tries web_music first, falls back through web/tv/android/ios
-          #     po_token=web+tv — tells yt-dlp to request PO tokens for these clients;
-          #                       the bgutil pip plugin fetches them from the host server
-          #                       via YTDLP_PO_TOKEN_URL (set in docker run -e below)
-          if [ -f /tmp/cookies.txt ]; then
-            YTDL_OPTS='{"concurrent_fragments":16,"cookiefile":"/cookies/cookies.txt","extractor_args":{"youtube":{"player_client":["web_music","web","tv","android","ios"],"po_token":["web+tv"]}}}'
-            COOKIE_MOUNT="-v /tmp/cookies.txt:/cookies/cookies.txt"
-            echo "✅ Cookies mount enabled (writable)"
-          else
-            YTDL_OPTS='{"concurrent_fragments":16,"extractor_args":{"youtube":{"player_client":["web_music","web","tv","android","ios"],"po_token":["web+tv"]}}}'
-            COOKIE_MOUNT=""
-          fi
-
-          # --network host: container shares the host's network stack, so
-          # localhost:4416 inside the container IS the bgutil server on the host.
-          # 172.17.0.1 (bridge IP) does NOT work because bgutil binds to 127.0.0.1
-          # only. With host networking there is no bridge — loopback is shared.
-          # Note: -p is not needed with host networking (port 8000 is already on host).
+          # --network host so Downtify can reach bgutil on localhost:4416
+          # We only need the API — no cookie/download config needed
           docker run -d \
-            --name downtify \
+            --name downtify-resolver \
             --network host \
-            -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
-            $COOKIE_MOUNT \
-            -e "YTDL_OPTIONS=$YTDL_OPTS" \
-            -e "YTDLP_PO_TOKEN_URL=http://localhost:4416" \
             ghcr.io/henriquesebastiao/downtify:latest
 
-          # ── Wait for the web server to become ready ──
-          echo "Waiting for web server..."
-          READY=0
+          echo "Waiting for Downtify API..."
           for i in {1..30}; do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
               --connect-timeout 3 --max-time 5 http://localhost:8000 2>/dev/null || echo "000")
-            if [[ "$HTTP_CODE" =~ ^[23] ]]; then
-              echo "✅ Server ready (HTTP $HTTP_CODE)"
-              READY=1
+            if [[ "$HTTP" =~ ^[23] ]]; then
+              echo "✅ Downtify ready (HTTP $HTTP)"
               break
             fi
-            echo "  attempt $i/30 – HTTP $HTTP_CODE – retrying..."
+            echo "  attempt $i/30 – HTTP $HTTP – retrying..."
             sleep 2
           done
-          if [ $READY -eq 0 ]; then
-            echo "::error::Downtify never became ready after 60s"
-            docker logs downtify --tail 50
-            exit 1
+
+      - name: Resolve Spotify → YouTube metadata
+        run: |
+          URL="${{ github.event.inputs.spotify_url }}"
+          ENCODED=$(printf '%s' "$URL" | jq -sRr @uri)
+          echo "Resolving: $URL"
+
+          curl -s --connect-timeout 15 --max-time 60 \
+            "http://localhost:8000/api/song/url?url=${ENCODED}" \
+            > /tmp/tracks_raw.json
+
+          echo "=== Raw API response (first 500 chars) ==="
+          head -c 500 /tmp/tracks_raw.json
+          echo ""
+
+          # Normalise to array regardless of single/album/playlist response
+          jq 'if type == "array" then . else [.] end' /tmp/tracks_raw.json \
+            > /tmp/tracks.json
+
+          TRACK_COUNT=$(jq 'length' /tmp/tracks.json)
+          echo "✅ Resolved $TRACK_COUNT track(s)"
+
+      - name: Stop & remove Downtify resolver
+        run: docker stop downtify-resolver && docker rm downtify-resolver
+
+      - name: Save Downtify image to cache
+        if: steps.cache-docker.outputs.cache-hit != 'true'
+        run: docker save ghcr.io/henriquesebastiao/downtify:latest -o /tmp/downtify-img.tar
+
+      # ──────────────────────────────────────────────
+      # COOKIES
+      # ──────────────────────────────────────────────
+      - name: Prepare cookies
+        run: |
+          if [ -n "$INPUT_COOKIES" ]; then
+            printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
+            echo "COOKIE_ARG=--cookies /tmp/cookies.txt" >> $GITHUB_ENV
+            echo "✅ Using inline cookies ($(wc -l < /tmp/cookies.txt) lines)"
+          elif [ -n "$SECRET_YT_COOKIES" ]; then
+            printf '%s' "$SECRET_YT_COOKIES" > /tmp/cookies.txt
+            echo "COOKIE_ARG=--cookies /tmp/cookies.txt" >> $GITHUB_ENV
+            echo "✅ Using YT_COOKIES secret ($(wc -l < /tmp/cookies.txt) lines)"
+          else
+            echo "COOKIE_ARG=" >> $GITHUB_ENV
+            echo "::warning::No cookies provided — bot-detection may block downloads"
           fi
-
-          # ── Install Node.js for yt-dlp JS challenge solving ──
-          # yt-dlp needs a JS runtime to solve YouTube's n-challenge and signature
-          # decryption. Without it you get "Signature solving failed" warnings and
-          # some formats become unavailable.
-          echo "Installing Node.js..."
-          docker exec downtify sh -c '
-            if command -v apk >/dev/null 2>&1; then
-              apk add --no-cache nodejs 2>/dev/null
-            elif command -v apt-get >/dev/null 2>&1; then
-              apt-get install -y --no-install-recommends nodejs 2>/dev/null
-            fi
-          ' || echo "::warning::Could not install Node.js — some formats may be missing"
-
-          # ── Install bgutil PO Token provider ──
-          echo "Installing bgutil PO Token provider..."
-          docker exec downtify pip install bgutil-yt-dlp-pot-provider --quiet \
-            || echo "::warning::Could not install bgutil — GVS PO Token will be missing"
-
-          # ── Upgrade yt-dlp ──
-          echo "Upgrading yt-dlp..."
-          docker exec downtify pip install --upgrade yt-dlp --quiet
-
-          # ── CRITICAL: restart so downtify re-imports yt-dlp with bgutil loaded ──
-          # bgutil is a yt-dlp plugin discovered at import time. The downtify process
-          # already imported yt-dlp before pip install, so bgutil has zero effect on
-          # the running process. A restart forces a fresh import with the plugin present.
-          echo "Restarting container so yt-dlp reloads plugins..."
-          docker restart downtify
-
-          echo "Waiting for server after restart..."
-          READY=0
-          for i in {1..20}; do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --connect-timeout 3 --max-time 5 http://localhost:8000 2>/dev/null || echo "000")
-            if [[ "$HTTP_CODE" =~ ^[23] ]]; then
-              echo "✅ Server ready after restart (HTTP $HTTP_CODE)"
-              READY=1
-              break
-            fi
-            echo "  attempt $i/20 – HTTP $HTTP_CODE – retrying..."
-            sleep 2
-          done
-          if [ $READY -eq 0 ]; then
-            echo "::error::Downtify did not recover after restart"
-            docker logs downtify --tail 50
-            exit 1
-          fi
-
-          # ── Apply format and bitrate settings ──
-          echo "Applying format and bitrate settings..."
-          curl -s -o /dev/null --connect-timeout 10 --max-time 15 \
-            -X POST http://localhost:8000/api/settings/update \
-            -H "Content-Type: application/json" \
-            -d "{\"format\":\"${{ github.event.inputs.output_format }}\",\"bitrate\":\"${{ github.event.inputs.audio_quality }}\"}"
-
         env:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      - name: Detect if playlist/album
-        id: detect
+      # ──────────────────────────────────────────────
+      # DOWNLOAD: native yt-dlp on host (proven stack)
+      # ──────────────────────────────────────────────
+      - name: Download tracks with native yt-dlp
         run: |
-          URL="${{ github.event.inputs.spotify_url }}"
-          if [[ "$URL" =~ /playlist/|/album/ ]]; then
-            echo "is_playlist=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_playlist=false" >> $GITHUB_OUTPUT
-          fi
-
-      # ----------------------------------------------
-      # SINGLE TRACK – using query parameter
-      # ----------------------------------------------
-      - name: Single track (POST /api/download/url)
-        if: steps.detect.outputs.is_playlist == 'false'
-        run: |
-          ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
-          echo "Downloading single track..."
-          HTTP_CODE=$(curl -s -o /tmp/dl_response.json -w "%{http_code}" \
-            --connect-timeout 10 --max-time 600 \
-            -X POST "http://localhost:8000/api/download/url?url=${ENCODED_URL}")
-          echo "  API response: $HTTP_CODE - $(cat /tmp/dl_response.json)"
-          if [[ ! "$HTTP_CODE" =~ ^[23] ]]; then
-            echo "::error::Download API returned HTTP $HTTP_CODE"
-            docker logs downtify --tail 50
-            exit 1
-          fi
-          COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
-            \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
-          echo "Download complete – $COUNT file(s)"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::error::API succeeded but no audio file found in output folder"
-            docker logs downtify --tail 50
-            exit 1
-          fi
-
-      # ----------------------------------------------
-      # PLAYLIST / ALBUM – resolve metadata
-      # ----------------------------------------------
-      - name: Playlist/album – resolve metadata
-        if: steps.detect.outputs.is_playlist == 'true'
-        id: resolve
-        run: |
-          ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
-          echo "Resolving playlist/album metadata from Spotify embed..."
-          curl -s "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
-          cat /tmp/tracks.json
-          TRACK_COUNT=$(jq 'if type=="array" then length else 1 end' /tmp/tracks.json)
-          echo "track_count=$TRACK_COUNT" >> $GITHUB_OUTPUT
-
-      # ----------------------------------------------
-      # PLAYLIST / ALBUM – batch download (parallel)
-      # ----------------------------------------------
-      - name: Playlist/album – batch download (parallel, up to 4 concurrent)
-        if: steps.detect.outputs.is_playlist == 'true'
-        run: |
-          echo "Submitting batch download..."
-          BATCH_BODY=$(jq -n \
-            --argjson songs "$(jq 'if type=="array" then . else [.] end' /tmp/tracks.json)" \
-            --arg playlist_url "${{ github.event.inputs.spotify_url }}" \
-            '{songs: $songs, playlist_url: $playlist_url, generate_m3u: true}')
-          HTTP_CODE=$(curl -s -o /tmp/batch_response.json -w "%{http_code}" \
-            --connect-timeout 10 --max-time 60 \
-            -X POST http://localhost:8000/api/download/batch \
-            -H "Content-Type: application/json" \
-            -d "$BATCH_BODY")
-          echo "  Batch API response: $HTTP_CODE - $(cat /tmp/batch_response.json)"
-          if [[ ! "$HTTP_CODE" =~ ^[23] ]]; then
-            echo "::error::Batch API returned HTTP $HTTP_CODE"
-            docker logs downtify --tail 50
-            exit 1
-          fi
-
-          EXPECTED=${{ steps.resolve.outputs.track_count }}
-          TIMEOUT=1200
-          ELAPSED=0
-          PREV_COUNT=0
-          STABLE=0
-          while [ $ELAPSED -lt $TIMEOUT ]; do
-            COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
-              \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
-            if [ $COUNT -eq $EXPECTED ]; then
-              echo "✅ All $EXPECTED tracks downloaded"
-              break
-            fi
-            if [ $COUNT -gt 0 ] && [ $COUNT -eq $PREV_COUNT ]; then
-              STABLE=$((STABLE + 1))
-              if [ $STABLE -ge 5 ]; then
-                echo "⚠️ No new files for 50s – assuming finished with $COUNT/$EXPECTED tracks"
-                break
-              fi
-            else
-              STABLE=0
-            fi
-            PREV_COUNT=$COUNT
-            echo "  Downloaded $COUNT / $EXPECTED – waiting..."
-            sleep 10
-            ELAPSED=$((ELAPSED + 10))
-          done
-          if [ $COUNT -eq 0 ]; then
-            echo "::error::No files downloaded after $TIMEOUT seconds"
-            docker logs downtify --tail 100
-            exit 1
-          fi
-
-      # ----------------------------------------------
-      # DEBUG – runs always, invaluable when things fail
-      # ----------------------------------------------
-      - name: Debug cookies & yt-dlp
-        if: always()
-        run: |
-          echo "=== bgutil reachable from HOST ==="
-          curl -s --max-time 3 http://localhost:4416/ping && echo "bgutil up on host" || echo "bgutil not responding on host"
-          echo "=== bgutil reachable from INSIDE container ==="
-          docker exec downtify sh -c 'curl -s --max-time 3 http://localhost:4416/ping' \
-            && echo "bgutil reachable from container" \
-            || echo "bgutil NOT reachable from container"
-          echo "=== YTDLP_PO_TOKEN_URL inside container ==="
-          docker exec downtify sh -c 'echo $YTDLP_PO_TOKEN_URL'
-          echo "=== Cookie mount check ==="
-          docker exec downtify ls -la /cookies/ 2>/dev/null || echo "No /cookies mount"
-          echo "=== YTDL_OPTIONS inside container ==="
-          docker exec downtify sh -c 'echo $YTDL_OPTIONS'
-          echo "=== yt-dlp version ==="
-          docker exec downtify yt-dlp --version 2>/dev/null || echo "Container already stopped"
-          echo "=== Quick title probe (no download) ==="
-          docker exec downtify yt-dlp \
-            --cookies /cookies/cookies.txt \
-            --print title \
-            "https://music.youtube.com/watch?v=UooqxWn0GBY" 2>&1 || true
-          echo "=== Last 80 container log lines ==="
-          docker logs downtify --tail 80 2>/dev/null || true
-
-      # ----------------------------------------------
-      # POST-PROCESSING
-      # ----------------------------------------------
-      - name: Apply custom filename (single file only)
-        if: github.event.inputs.custom_filename != '' && steps.detect.outputs.is_playlist == 'false'
-        run: |
+          export YTDLP_PO_TOKEN_URL="http://localhost:4416"
+          FORMAT="${{ github.event.inputs.output_format }}"
+          QUALITY="${{ github.event.inputs.audio_quality }}"
+          OUTPUT="${{ github.event.inputs.output_folder }}"
           CUSTOM="${{ github.event.inputs.custom_filename }}"
-          EXT="${{ github.event.inputs.output_format }}"
-          OUTPUT="${{ github.event.inputs.output_folder }}"
-          OLD=$(find "$OUTPUT" -type f \
-            \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | head -1)
-          if [ -f "$OLD" ]; then
-            mv "$OLD" "$OUTPUT/${CUSTOM}.${EXT}"
-            echo "✅ Renamed to ${CUSTOM}.${EXT}"
-          fi
 
-      - name: Stop container
-        if: always()
-        run: docker stop downtify
+          # Verify PO Token server
+          curl -s http://localhost:4416/ping \
+            && echo "✅ PO Token server reachable" \
+            || echo "::warning::PO Token server not responding"
 
-      - name: Save Docker image to cache
-        if: steps.cache-docker.outputs.cache-hit != 'true'
-        run: docker save ghcr.io/henriquesebastiao/downtify:latest -o /tmp/downtify-img.tar
+          TRACK_COUNT=$(jq 'length' /tmp/tracks.json)
+          echo "Downloading $TRACK_COUNT track(s)..."
 
-      - name: Remove container
-        if: always()
-        run: docker rm downtify
+          # Store per-track metadata next to each downloaded file for mutagen step
+          mkdir -p /tmp/track_meta
 
-      - name: Split large files (repository / temp_branch)
-        if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
+          INDEX=0
+          jq -c '.[]' /tmp/tracks.json | while IFS= read -r TRACK; do
+            INDEX=$((INDEX + 1))
+
+            # Extract YouTube URL — Downtify returns different field names depending on version
+            YT_URL=$(echo "$TRACK" | jq -r '
+              .youtube_url //
+              .yt_url //
+              .url //
+              empty
+            ' | grep -E '^https?://' | head -1)
+
+            if [ -z "$YT_URL" ]; then
+              echo "::warning::Track $INDEX has no YouTube URL — skipping"
+              echo "$TRACK" | jq '.'
+              continue
+            fi
+
+            # Extract Spotify metadata for mutagen
+            TITLE=$(echo "$TRACK" | jq -r '.name // .title // "Unknown Title"')
+            ARTIST=$(echo "$TRACK" | jq -r '
+              if .artists then (.artists | if type == "array" then map(.name // .) | join(", ") else . end)
+              elif .artist then .artist
+              else "Unknown Artist"
+              end
+            ')
+            ALBUM=$(echo "$TRACK" | jq -r '.album.name // .album // "Unknown Album"')
+            ALBUM_ARTIST=$(echo "$TRACK" | jq -r '
+              .album.artists[0].name //
+              .album_artist //
+              .artists[0].name //
+              "Unknown"
+            ')
+            TRACK_NUM=$(echo "$TRACK" | jq -r '.track_number // .disc_number // 0')
+            TOTAL_TRACKS=$(echo "$TRACK" | jq -r '.album.total_tracks // 0')
+            COVER_URL=$(echo "$TRACK" | jq -r '
+              .album.images[0].url //
+              .cover_url //
+              .thumbnail //
+              empty
+            ' | head -1)
+            SPOTIFY_ID=$(echo "$TRACK" | jq -r '.id // empty')
+            YEAR=$(echo "$TRACK" | jq -r '
+              .album.release_date //
+              .release_date //
+              empty
+            ' | grep -oE '^[0-9]{4}' | head -1)
+
+            # Build safe filename key: use Spotify ID if available, else index
+            KEY="${SPOTIFY_ID:-track_${INDEX}}"
+
+            # Save metadata JSON for the mutagen step
+            jq -n \
+              --arg title "$TITLE" \
+              --arg artist "$ARTIST" \
+              --arg album "$ALBUM" \
+              --arg album_artist "$ALBUM_ARTIST" \
+              --arg track_num "$TRACK_NUM" \
+              --arg total_tracks "$TOTAL_TRACKS" \
+              --arg cover_url "$COVER_URL" \
+              --arg year "$YEAR" \
+              --arg yt_url "$YT_URL" \
+              --arg key "$KEY" \
+              '{
+                title: $title, artist: $artist, album: $album,
+                album_artist: $album_artist, track_num: $track_num,
+                total_tracks: $total_tracks, cover_url: $cover_url,
+                year: $year, yt_url: $yt_url, key: $key
+              }' > "/tmp/track_meta/${KEY}.json"
+
+            # Determine output filename
+            if [ -n "$CUSTOM" ] && [ "$TRACK_COUNT" -eq 1 ]; then
+              OUTFILE="$OUTPUT/${CUSTOM}.%(ext)s"
+            else
+              SAFE_TITLE=$(echo "$TITLE" | tr -d '/<>:"\|?*' | cut -c1-100)
+              SAFE_ARTIST=$(echo "$ARTIST" | tr -d '/<>:"\|?*' | cut -c1-60)
+              OUTFILE="$OUTPUT/${SAFE_ARTIST} - ${SAFE_TITLE} [%(id)s].%(ext)s"
+            fi
+
+            echo "──────────────────────────────"
+            echo "[$INDEX/$TRACK_COUNT] $ARTIST – $TITLE"
+            echo "  YouTube: $YT_URL"
+
+            yt-dlp \
+              --ffmpeg-location /usr/local/bin \
+              --js-runtimes node \
+              --extractor-args "youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv" \
+              -x \
+              --audio-format "$FORMAT" \
+              --audio-quality "${QUALITY}K" \
+              --embed-thumbnail \
+              --embed-metadata \
+              --write-thumbnail \
+              --convert-thumbnails jpg \
+              --newline \
+              $COOKIE_ARG \
+              -o "$OUTFILE" \
+              --print after_move:filepath \
+              "$YT_URL" 2>&1 | tee "/tmp/yt_out_${KEY}.log"
+
+            # Capture actual output filepath from yt-dlp's --print
+            ACTUAL_FILE=$(grep -oE '^/.+\.(mp3|flac|m4a|opus)$' \
+              "/tmp/yt_out_${KEY}.log" | tail -1)
+
+            if [ -n "$ACTUAL_FILE" ]; then
+              echo "$ACTUAL_FILE" > "/tmp/track_meta/${KEY}.filepath"
+              echo "  ✅ Saved to: $ACTUAL_FILE"
+            else
+              # Fallback: find newest audio file
+              FOUND=$(find "$OUTPUT" -type f \
+                \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) \
+                -newer "/tmp/track_meta/${KEY}.json" | sort | tail -1)
+              if [ -n "$FOUND" ]; then
+                echo "$FOUND" > "/tmp/track_meta/${KEY}.filepath"
+                echo "  ✅ (fallback) Saved to: $FOUND"
+              else
+                echo "  ::warning::Could not locate output file for track $INDEX"
+              fi
+            fi
+
+          done
+
+      # ──────────────────────────────────────────────
+      # METADATA: inject Spotify tags via mutagen
+      # ──────────────────────────────────────────────
+      - name: Inject Spotify metadata with mutagen
         run: |
-          OUTPUT="${{ github.event.inputs.output_folder }}"
+          python3 << 'PYEOF'
+          import os, json, sys, glob, urllib.request, urllib.error, tempfile, traceback
+
+          meta_dir = "/tmp/track_meta"
+          meta_files = glob.glob(f"{meta_dir}/*.json")
+
+          if not meta_files:
+              print("No metadata files found — skipping mutagen step")
+              sys.exit(0)
+
+          print(f"Injecting metadata for {len(meta_files)} track(s)...")
+
+          for meta_path in sorted(meta_files):
+              key = os.path.splitext(os.path.basename(meta_path))[0]
+              filepath_file = meta_path.replace(".json", ".filepath")
+
+              if not os.path.exists(filepath_file):
+                  print(f"  ⚠ No filepath recorded for {key} — skipping")
+                  continue
+
+              with open(filepath_file) as f:
+                  audio_path = f.read().strip()
+
+              if not os.path.exists(audio_path):
+                  print(f"  ⚠ File not found: {audio_path} — skipping")
+                  continue
+
+              with open(meta_path) as f:
+                  m = json.load(f)
+
+              title        = m.get("title", "")
+              artist       = m.get("artist", "")
+              album        = m.get("album", "")
+              album_artist = m.get("album_artist", "")
+              track_num    = m.get("track_num", "0")
+              total_tracks = m.get("total_tracks", "0")
+              cover_url    = m.get("cover_url", "")
+              year         = m.get("year", "")
+              ext          = os.path.splitext(audio_path)[1].lower()
+
+              print(f"  → {os.path.basename(audio_path)}")
+              print(f"     {artist} / {album} / {title}")
+
+              # Download cover art
+              cover_data = None
+              if cover_url:
+                  try:
+                      req = urllib.request.Request(
+                          cover_url,
+                          headers={"User-Agent": "Mozilla/5.0"}
+                      )
+                      with urllib.request.urlopen(req, timeout=15) as r:
+                          cover_data = r.read()
+                      print(f"     cover: {len(cover_data)//1024} KB from {cover_url[:60]}...")
+                  except Exception as e:
+                      print(f"     ⚠ Cover download failed: {e}")
+
+              try:
+                  if ext == ".mp3":
+                      from mutagen.id3 import (
+                          ID3, TIT2, TPE1, TALB, TPE2, TRCK, TDRC, APIC,
+                          ID3NoHeaderError
+                      )
+                      try:
+                          tags = ID3(audio_path)
+                      except ID3NoHeaderError:
+                          tags = ID3()
+
+                      tags.setall("TIT2", [TIT2(encoding=3, text=title)])
+                      tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
+                      tags.setall("TALB", [TALB(encoding=3, text=album)])
+                      tags.setall("TPE2", [TPE2(encoding=3, text=album_artist)])
+                      if year:
+                          tags.setall("TDRC", [TDRC(encoding=3, text=year)])
+                      trck = track_num if not total_tracks or total_tracks == "0" \
+                            else f"{track_num}/{total_tracks}"
+                      tags.setall("TRCK", [TRCK(encoding=3, text=trck)])
+                      if cover_data:
+                          tags.setall("APIC", [APIC(
+                              encoding=3,
+                              mime="image/jpeg",
+                              type=3,  # front cover
+                              desc="Cover",
+                              data=cover_data,
+                          )])
+                      tags.save(audio_path, v2_version=3)
+
+                  elif ext == ".flac":
+                      from mutagen.flac import FLAC, Picture
+                      tags = FLAC(audio_path)
+                      tags["title"]        = [title]
+                      tags["artist"]       = [artist]
+                      tags["album"]        = [album]
+                      tags["albumartist"]  = [album_artist]
+                      tags["tracknumber"]  = [str(track_num)]
+                      if total_tracks and total_tracks != "0":
+                          tags["totaltracks"] = [str(total_tracks)]
+                      if year:
+                          tags["date"] = [year]
+                      if cover_data:
+                          pic = Picture()
+                          pic.type = 3
+                          pic.mime = "image/jpeg"
+                          pic.desc = "Cover"
+                          pic.data = cover_data
+                          tags.clear_pictures()
+                          tags.add_picture(pic)
+                      tags.save()
+
+                  elif ext in (".m4a", ".aac", ".mp4"):
+                      from mutagen.mp4 import MP4, MP4Cover
+                      tags = MP4(audio_path)
+                      tags["\xa9nam"] = [title]
+                      tags["\xa9ART"] = [artist]
+                      tags["\xa9alb"] = [album]
+                      tags["aART"]    = [album_artist]
+                      if year:
+                          tags["\xa9day"] = [year]
+                      try:
+                          tn = int(track_num) if track_num else 0
+                          tt = int(total_tracks) if total_tracks else 0
+                          tags["trkn"] = [(tn, tt)]
+                      except (ValueError, TypeError):
+                          pass
+                      if cover_data:
+                          tags["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
+                      tags.save()
+
+                  elif ext in (".opus", ".ogg"):
+                      from mutagen.oggopus import OggOpus
+                      from mutagen.flac import Picture
+                      import base64
+                      tags = OggOpus(audio_path)
+                      tags["title"]       = [title]
+                      tags["artist"]      = [artist]
+                      tags["album"]       = [album]
+                      tags["albumartist"] = [album_artist]
+                      tags["tracknumber"] = [str(track_num)]
+                      if year:
+                          tags["date"] = [year]
+                      if cover_data:
+                          pic = Picture()
+                          pic.type = 3
+                          pic.mime = "image/jpeg"
+                          pic.desc = "Cover"
+                          pic.data = cover_data
+                          tags["metadata_block_picture"] = [
+                              base64.b64encode(pic.write()).decode("ascii")
+                          ]
+                      tags.save()
+
+                  else:
+                      print(f"     ⚠ Unsupported extension {ext} — skipping mutagen")
+                      continue
+
+                  print(f"     ✅ Metadata injected")
+
+              except Exception:
+                  print(f"     ❌ mutagen failed for {audio_path}:")
+                  traceback.print_exc()
+
+          print("Metadata injection complete.")
+          PYEOF
+
+      # ──────────────────────────────────────────────
+      # DEBUG (always runs)
+      # ──────────────────────────────────────────────
+      - name: Debug summary
+        if: always()
+        run: |
+          echo "=== bgutil status ==="
+          curl -s --max-time 3 http://localhost:4416/ping && echo "bgutil up" || echo "bgutil down"
+
+          echo "=== Downloaded files ==="
+          find "${{ github.event.inputs.output_folder }}" -type f | sort | while read f; do
+            echo "  $(du -sh "$f" | cut -f1)  $f"
+          done
+
+          echo "=== yt-dlp version ==="
+          yt-dlp --version
+
+          echo "=== Track metadata files ==="
+          ls /tmp/track_meta/ 2>/dev/null || echo "(none)"
+
+      # ──────────────────────────────────────────────
+      # SPLIT LARGE FILES
+      # ──────────────────────────────────────────────
+      - name: Split large files (repository / temp_branch)
+        if: >
+          (github.event.inputs.upload_method == 'repository' ||
+           github.event.inputs.upload_method == 'temp_branch') &&
+          github.event.inputs.max_part_mb != '0'
+        run: |
           THRESH_MB="${{ github.event.inputs.max_part_mb }}"
-          if [ "$THRESH_MB" -le 0 ]; then exit 0; fi
           THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
-          for f in "$OUTPUT"/*; do
+          for f in "${{ github.event.inputs.output_folder }}"/*; do
             [ -f "$f" ] || continue
             size=$(stat -c%s "$f")
-            if [ $size -gt $THRESH_BYTES ]; then
+            if [ "$size" -gt "$THRESH_BYTES" ]; then
               echo "Splitting $(basename "$f") into ${THRESH_MB}MB parts"
-              split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
+              split -b "${THRESH_MB}m" -d -a 3 "$f" "${f}."
               rm "$f"
             fi
           done
 
-      - name: Split large files (release – 2GB limit)
+      - name: Split large files (release — 2GB limit)
         if: github.event.inputs.upload_method == 'release'
         run: |
-          OUTPUT="${{ github.event.inputs.output_folder }}"
           LIMIT=$((2*1024*1024*1024))
-          for f in "$OUTPUT"/*; do
+          for f in "${{ github.event.inputs.output_folder }}"/*; do
             [ -f "$f" ] || continue
             size=$(stat -c%s "$f")
-            if [ $size -gt $LIMIT ]; then
+            if [ "$size" -gt "$LIMIT" ]; then
               echo "Splitting $(basename "$f") into 2GB parts"
-              split -b 2048m -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
+              split -b 2048m -d -a 3 "$f" "${f}."
               rm "$f"
             fi
           done
 
-      - name: Get date
+      # ──────────────────────────────────────────────
+      # UPLOAD
+      # ──────────────────────────────────────────────
+      - name: Get timestamp
         id: date
-        run: echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+        run: echo "date=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
 
       - name: Push to repository
         if: github.event.inputs.upload_method == 'repository'
@@ -447,7 +636,7 @@ jobs:
           git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || exit 0
           for attempt in 1 2 3; do
             git pull --rebase origin main
-            if git push origin main; then break; fi
+            git push origin main && break
             sleep 5
           done
 
@@ -456,10 +645,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local http.postBuffer 524288000
           git add "${{ github.event.inputs.output_folder }}/"
           git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || exit 0
           for attempt in 1 2 3; do
-            if git push origin "${{ github.event.inputs.branch_name }}"; then break; fi
+            git push origin "${{ github.event.inputs.branch_name }}" && break
             sleep 5
           done
 
@@ -467,7 +657,10 @@ jobs:
         if: github.event.inputs.upload_method == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('spotify-{0}', github.run_number) }}
+          tag_name: >-
+            ${{ github.event.inputs.release_tag != '' &&
+                github.event.inputs.release_tag ||
+                format('spotify-{0}', github.run_number) }}
           name: "Spotify Download – ${{ github.event.inputs.spotify_url }}"
           body: |
             Spotify download completed
