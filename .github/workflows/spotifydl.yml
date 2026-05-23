@@ -133,12 +133,18 @@ jobs:
             exit 1
           fi
 
-          # Inject cookies into the container via yt-dlp config file
-          # (more reliable than YTDL_OPTIONS env var parsing)
+          # Inject cookies via /etc/yt-dlp.conf (system-wide, works regardless of container user)
           if [ -f /tmp/cookies.txt ]; then
             docker cp /tmp/cookies.txt downtify:/tmp/cookies.txt
-            docker exec downtify sh -c "mkdir -p /root/.config/yt-dlp && printf '--cookies /tmp/cookies.txt\n' > /root/.config/yt-dlp/config"
-            echo "Cookies injected into container ($(wc -l < /tmp/cookies.txt) lines)"
+            docker exec downtify sh -c "printf '--cookies /tmp/cookies.txt\n' > /etc/yt-dlp.conf"
+            echo "Cookies injected ($(wc -l < /tmp/cookies.txt) lines)"
+
+            # Verify setup inside container
+            echo "Container user: $(docker exec downtify whoami)"
+            echo "Cookie file: $(docker exec downtify ls -lh /tmp/cookies.txt)"
+            echo "yt-dlp config: $(docker exec downtify cat /etc/yt-dlp.conf)"
+          else
+            echo "::warning::No cookies found - YT_COOKIES secret may not be set"
           fi
 
           echo "Upgrading yt-dlp inside container"
