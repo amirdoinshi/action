@@ -50,6 +50,13 @@ on:
         required: false
         type: string
         default: ''
+      cookies:
+        description: |
+          YouTube cookies (Netscape format) to bypass bot-detection.
+          Safer alternative: store as a repo secret named YT_COOKIES — used automatically.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -89,11 +96,29 @@ jobs:
       - name: Start downtify container
         id: start-downtify
         run: |
+          # Write cookies from inline input or YT_COOKIES secret
+          COOKIE_MOUNT=""
+          COOKIE_YTDL=""
+          if [ -n "$INPUT_COOKIES" ]; then
+            printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
+            echo "Using inline cookies ($(wc -l < /tmp/cookies.txt) lines)"
+          elif [ -n "$SECRET_YT_COOKIES" ]; then
+            printf '%s' "$SECRET_YT_COOKIES" > /tmp/cookies.txt
+            echo "Using YT_COOKIES secret ($(wc -l < /tmp/cookies.txt) lines)"
+          else
+            echo "No cookies provided - downloads may fail for bot-protected content"
+          fi
+          if [ -f /tmp/cookies.txt ]; then
+            COOKIE_MOUNT="-v /tmp/cookies.txt:/cookies.txt:ro"
+            COOKIE_YTDL=',"cookiefile":"/cookies.txt"'
+          fi
+
           docker run -d \
             --name downtify \
             -p 8000:8000 \
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
-            -e YTDL_OPTIONS='{"concurrent_fragments": 16}' \
+            $COOKIE_MOUNT \
+            -e "YTDL_OPTIONS={\"concurrent_fragments\":16${COOKIE_YTDL}}" \
             ghcr.io/henriquesebastiao/downtify:latest
 
           echo "Waiting for web server..."
@@ -123,6 +148,10 @@ jobs:
             -X POST http://localhost:8000/api/settings/update \
             -H "Content-Type: application/json" \
             -d "{\"format\":\"${{ github.event.inputs.output_format }}\",\"bitrate\":\"${{ github.event.inputs.audio_quality }}\"}"
+
+        env:
+          INPUT_COOKIES: ${{ github.event.inputs.cookies }}
+          SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
       - name: Detect if playlist/album
         id: detect
