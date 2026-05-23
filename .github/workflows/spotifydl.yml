@@ -5,6 +5,7 @@ name: Spotify Downloader
 #   - Finds the best YouTube Music match automatically
 #   - Downloads via yt-dlp with our bgutil PO Token setup
 #   - Injects all Spotify tags — no separate mutagen step needed
+#   - Saves cover art as a separate image file
 #
 # Required secrets (free from https://developer.spotify.com/dashboard):
 #   SPOTIFY_CLIENT_ID
@@ -204,6 +205,7 @@ jobs:
             --bitrate "${{ github.event.inputs.audio_quality }}k" \
             --ffmpeg /usr/local/bin/ffmpeg \
             --output "${{ github.event.inputs.output_folder }}/{artists} - {title}.{output-ext}" \
+            --save-cover \
             --yt-dlp-args "$YTDLP_ARGS"
 
           COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
