@@ -1,9 +1,5 @@
 name: Spotify Downloader
 
-# Uses spotdl + mutagen metadata extraction
-# Required secrets: SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-# Optional: YT_COOKIES
-
 on:
   workflow_dispatch:
     inputs:
@@ -184,41 +180,108 @@ jobs:
             --output "${{ github.event.inputs.output_folder }}/{artists} - {title}.{output-ext}" \
             --yt-dlp-args "$YTDLP_ARGS"
 
-      - name: Extract metadata using mutagen
+      - name: Extract metadata using mutagen (robust for all formats)
         run: |
           cd "${{ github.event.inputs.output_folder }}"
           python3 << 'EOF'
           import os, json
-          from mutagen import File
-          audio_exts = {'.mp3', '.flac', '.m4a', '.opus'}
+          import mutagen
+          from mutagen.easyid3 import EasyID3
+          from mutagen.flac import FLAC
+          from mutagen.mp4 import MP4
+          from mutagen.oggopus import OggOpus
+
+          audio_exts = {'.mp3': 'mp3', '.flac': 'flac', '.m4a': 'm4a', '.opus': 'opus'}
+
+          def get_tags_m4a(filepath):
+              tags = MP4(filepath)
+              def get(key):
+                  return tags.get(key, [''])[0] if tags.get(key) else ''
+              return {
+                  'title': get('\xa9nam'),
+                  'artist': get('\xa9ART'),
+                  'album': get('\xa9alb'),
+                  'genre': get('\xa9gen'),
+                  'year': get('\xa9day')[:4],
+              }
+
+          def get_tags_mp3(filepath):
+              try:
+                  tags = EasyID3(filepath)
+              except:
+                  return {}
+              return {
+                  'title': tags.get('title', [''])[0],
+                  'artist': tags.get('artist', [''])[0],
+                  'album': tags.get('album', [''])[0],
+                  'genre': tags.get('genre', [''])[0],
+                  'year': tags.get('date', [''])[0][:4] if tags.get('date') else '',
+              }
+
+          def get_tags_flac(filepath):
+              tags = FLAC(filepath)
+              return {
+                  'title': tags.get('title', [''])[0] if tags.get('title') else '',
+                  'artist': tags.get('artist', [''])[0] if tags.get('artist') else '',
+                  'album': tags.get('album', [''])[0] if tags.get('album') else '',
+                  'genre': tags.get('genre', [''])[0] if tags.get('genre') else '',
+                  'year': tags.get('date', [''])[0][:4] if tags.get('date') else '',
+              }
+
+          def get_tags_opus(filepath):
+              tags = OggOpus(filepath)
+              # OggOpus doesn't have easy tag access, fallback to filename
+              return {}
+
           for f in os.listdir('.'):
-              if os.path.splitext(f)[1].lower() not in audio_exts:
+              ext = os.path.splitext(f)[1].lower()
+              if ext not in audio_exts:
                   continue
-              audio = File(f)
-              if not audio:
-                  continue
-              info = {}
-              if hasattr(audio, 'get'):
-                  info['title'] = str(audio.get('title', [''])[0]) or os.path.splitext(f)[0]
-                  info['artist'] = str(audio.get('artist', ['Unknown Artist'])[0])
-                  info['album'] = str(audio.get('album', [''])[0])
-                  info['genre'] = str(audio.get('genre', [''])[0])
-                  year = audio.get('date') or audio.get('year')
-                  info['year'] = str(year[0])[:4] if year else ''
-                  track = audio.get('tracknumber')
-                  info['tracknumber'] = str(track[0]) if track else ''
-              else:
-                  info['title'] = os.path.splitext(f)[0]
-                  info['artist'] = 'Unknown Artist'
-              info['duration'] = int(audio.info.length) if hasattr(audio.info, 'length') else 0
+              filepath = f
+              tags = {}
+              if ext == '.mp3':
+                  tags = get_tags_mp3(filepath)
+              elif ext == '.flac':
+                  tags = get_tags_flac(filepath)
+              elif ext == '.m4a':
+                  tags = get_tags_m4a(filepath)
+              elif ext == '.opus':
+                  tags = get_tags_opus(filepath)
+
+              # Fallback to filename parsing if critical fields missing
+              base = os.path.splitext(f)[0]
+              if ' - ' in base:
+                  parts = base.split(' - ', 1)
+                  if not tags.get('artist') and len(parts) >= 1:
+                      tags['artist'] = parts[0].strip()
+                  if not tags.get('title') and len(parts) >= 2:
+                      tags['title'] = parts[1].strip()
+              if not tags.get('title'):
+                  tags['title'] = base
+              if not tags.get('artist'):
+                  tags['artist'] = 'Unknown Artist'
+
+              # Duration
+              audio = mutagen.File(filepath)
+              duration = int(audio.info.length) if audio and hasattr(audio.info, 'length') else 0
+
+              info = {
+                  'title': tags.get('title', ''),
+                  'artist': tags.get('artist', ''),
+                  'album': tags.get('album', ''),
+                  'genre': tags.get('genre', ''),
+                  'year': tags.get('year', ''),
+                  'duration': duration,
+              }
               with open(f + '.info.json', 'w') as jf:
                   json.dump(info, jf, indent=2)
-              print(f"✅ Metadata for {f}")
+              print(f"✅ Metadata for {f}: {info['artist']} - {info['title']}")
           EOF
 
-      - name: Extract cover art (fallback)
+      - name: Extract cover art (only one, clean extras)
         run: |
           cd "${{ github.event.inputs.output_folder }}"
+          rm -f cover.jpg cover.png
           AUDIO_FILE=$(find . -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | head -1)
           if [ -n "$AUDIO_FILE" ]; then
             /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec copy cover.jpg -y 2>/dev/null || \
