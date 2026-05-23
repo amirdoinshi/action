@@ -1,4 +1,4 @@
-name: Spotify Downloader 
+name: Spotify Downloader (Downtify – no API keys)
 
 on:
   workflow_dispatch:
@@ -123,16 +123,20 @@ jobs:
             echo "is_playlist=false" >> $GITHUB_OUTPUT
           fi
 
+      # ----------------------------------------------
+      # SINGLE TRACK – using query parameter (FIXED)
+      # ----------------------------------------------
       - name: 📥 Single track (POST /api/download/url)
         if: steps.detect.outputs.is_playlist == 'false'
         run: |
-          echo "📡 Downloading single track..."
-          curl -X POST http://localhost:8000/api/download/url \
+          ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
+          echo "📡 Downloading single track (URL as query param)..."
+          curl -X POST "http://localhost:8000/api/download/url?url=${ENCODED_URL}" \
             -H "Content-Type: application/json" \
-            -d "{\"url\":\"${{ github.event.inputs.spotify_url }}\"}"
+            -d '{}'
 
           # Wait for file to appear
-          TIMEOUT=300
+          TIMEOUT=600
           ELAPSED=0
           while [ $ELAPSED -lt $TIMEOUT ]; do
             COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
@@ -144,22 +148,28 @@ jobs:
             ELAPSED=$((ELAPSED + 5))
           done
           if [ $COUNT -eq 0 ]; then
-            echo "::error::No file downloaded"
-            docker logs downtify
+            echo "::error::No file downloaded after $TIMEOUT seconds"
+            docker logs downtify --tail 100
             exit 1
           fi
 
+      # ----------------------------------------------
+      # PLAYLIST / ALBUM – resolve metadata
+      # ----------------------------------------------
       - name: 📥 Playlist/album – resolve metadata
         if: steps.detect.outputs.is_playlist == 'true'
         id: resolve
         run: |
+          ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
           echo "📡 Resolving playlist/album metadata from Spotify embed..."
-          curl -s "http://localhost:8000/api/song/url?url=${{ github.event.inputs.spotify_url }}" > /tmp/tracks.json
+          curl -s "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
           cat /tmp/tracks.json
-          # Count tracks
           TRACK_COUNT=$(jq 'if type=="array" then length else 1 end' /tmp/tracks.json)
           echo "track_count=$TRACK_COUNT" >> $GITHUB_OUTPUT
 
+      # ----------------------------------------------
+      # PLAYLIST / ALBUM – batch download (parallel)
+      # ----------------------------------------------
       - name: 📥 Playlist/album – batch download (parallel, up to 4 concurrent)
         if: steps.detect.outputs.is_playlist == 'true'
         run: |
@@ -168,9 +178,8 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"playlist_url\":\"${{ github.event.inputs.spotify_url }}\",\"generate_m3u\":true}"
 
-          # Wait for all tracks to finish (monitor via file count)
           EXPECTED=${{ steps.resolve.outputs.track_count }}
-          TIMEOUT=900
+          TIMEOUT=1200
           ELAPSED=0
           PREV_COUNT=0
           STABLE=0
@@ -195,11 +204,14 @@ jobs:
             ELAPSED=$((ELAPSED + 10))
           done
           if [ $COUNT -eq 0 ]; then
-            echo "::error::No files downloaded"
-            docker logs downtify
+            echo "::error::No files downloaded after $TIMEOUT seconds"
+            docker logs downtify --tail 100
             exit 1
           fi
 
+      # ----------------------------------------------
+      # POST-PROCESSING
+      # ----------------------------------------------
       - name: ✏️ Apply custom filename (single file only)
         if: github.event.inputs.custom_filename != '' && steps.detect.outputs.is_playlist == 'false'
         run: |
