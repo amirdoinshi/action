@@ -107,11 +107,20 @@ jobs:
             echo "No cookies provided - downloads may fail for bot-protected content"
           fi
 
+          # Build YTDL_OPTIONS before docker run so the JSON is set correctly at startup.
+          # yt-dlp config files are ignored when called as a Python library (which downtify does),
+          # so cookiefile MUST be in ydl_opts via YTDL_OPTIONS — there is no other way.
+          if [ -f /tmp/cookies.txt ]; then
+            YTDL_OPTS='{"concurrent_fragments":16,"cookiefile":"/tmp/cookies.txt"}'
+          else
+            YTDL_OPTS='{"concurrent_fragments":16}'
+          fi
+
           docker run -d \
             --name downtify \
             -p 8000:8000 \
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
-            -e YTDL_OPTIONS='{"concurrent_fragments":16}' \
+            -e "YTDL_OPTIONS=$YTDL_OPTS" \
             ghcr.io/henriquesebastiao/downtify:latest
 
           echo "Waiting for web server..."
@@ -133,18 +142,14 @@ jobs:
             exit 1
           fi
 
-          # Inject cookies via /etc/yt-dlp.conf (system-wide, works regardless of container user)
+          # Copy cookies into the container after it starts.
+          # YTDL_OPTIONS already has the cookiefile path set — this just places the actual file there.
           if [ -f /tmp/cookies.txt ]; then
             docker cp /tmp/cookies.txt downtify:/tmp/cookies.txt
-            docker exec downtify sh -c "printf '--cookies /tmp/cookies.txt\n' > /etc/yt-dlp.conf"
-            echo "Cookies injected ($(wc -l < /tmp/cookies.txt) lines)"
-
-            # Verify setup inside container
-            echo "Container user: $(docker exec downtify whoami)"
-            echo "Cookie file: $(docker exec downtify ls -lh /tmp/cookies.txt)"
-            echo "yt-dlp config: $(docker exec downtify cat /etc/yt-dlp.conf)"
+            echo "Cookies copied into container ($(wc -l < /tmp/cookies.txt) lines)"
+            echo "YTDL_OPTIONS: $(docker exec downtify sh -c 'echo $YTDL_OPTIONS')"
           else
-            echo "::warning::No cookies found - YT_COOKIES secret may not be set"
+            echo "::warning::No cookies - YT_COOKIES secret may not be set"
           fi
 
           echo "Upgrading yt-dlp inside container"
