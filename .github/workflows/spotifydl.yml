@@ -54,7 +54,7 @@ on:
         default: ''
 
       branch_name:
-        description: 'Temp branch name (upload_method = temp_branch only)'
+        description: 'Temp branch name (upload_method = temp_branch only) – leave empty for auto-generation (run_<run_id>)'
         required: false
         type: string
         default: ''
@@ -94,12 +94,26 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
-      - name: Create or checkout temporary branch
-        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+      - name: Determine branch name (auto‑generate if empty)
+        id: branch
         run: |
-          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
-          git checkout -b "${{ github.event.inputs.branch_name }}"
-          git push -u origin "${{ github.event.inputs.branch_name }}"
+          if [ -z "${{ github.event.inputs.branch_name }}" ]; then
+            BRANCH="run_${{ github.run_id }}"
+            echo "branch_name=$BRANCH" >> $GITHUB_OUTPUT
+            echo "Auto‑generated branch name: $BRANCH"
+          else
+            echo "branch_name=${{ github.event.inputs.branch_name }}" >> $GITHUB_OUTPUT
+            echo "Using provided branch name: ${{ github.event.inputs.branch_name }}"
+          fi
+
+      - name: Create or checkout temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch'
+        run: |
+          BRANCH="${{ steps.branch.outputs.branch_name }}"
+          # Since branch_name is always unique (run_<run_id>), no fetch needed
+          git checkout -b "$BRANCH"
+          git push -u origin "$BRANCH"
+          echo "✅ Created and pushed branch: $BRANCH"
 
       - name: Create output directory
         run: mkdir -p "${{ github.event.inputs.output_folder }}"
@@ -279,8 +293,9 @@ jobs:
           done
 
       - name: Push changes to temporary branch
-        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        if: github.event.inputs.upload_method == 'temp_branch'
         run: |
+          BRANCH="${{ steps.branch.outputs.branch_name }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --local http.postBuffer 524288000
@@ -291,7 +306,7 @@ jobs:
           git add "${{ github.event.inputs.output_folder }}/"
           git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || echo "Nothing to commit"
           for push_attempt in 1 2 3; do
-            if git push origin "${{ github.event.inputs.branch_name }}"; then
+            if git push origin "$BRANCH"; then
               break
             fi
             echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
