@@ -1,17 +1,8 @@
 name: Spotify Downloader
 
-# Uses spotdl — the correct tool for Spotify downloads:
-#   - Spotify API → full metadata (album, track#, cover art, ISRC, etc.)
-#   - Finds the best YouTube Music match automatically
-#   - Downloads via yt-dlp with our bgutil PO Token setup
-#   - Injects all Spotify tags — no separate mutagen step needed
-#   - Cover art extracted via ffmpeg after download
-#
-# Required secrets (free from https://developer.spotify.com/dashboard):
-#   SPOTIFY_CLIENT_ID
-#   SPOTIFY_CLIENT_SECRET
-# Optional secret:
-#   YT_COOKIES  (Netscape format, helps bypass bot detection)
+# Uses spotdl + mutagen metadata extraction
+# Required secrets: SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+# Optional: YT_COOKIES
 
 on:
   workflow_dispatch:
@@ -20,62 +11,51 @@ on:
         description: 'Spotify URL (track, album, or playlist)'
         required: true
         type: string
-
       output_format:
         description: 'Audio format'
         required: false
         type: choice
         options: ['mp3', 'flac', 'm4a', 'opus']
         default: 'mp3'
-
       audio_quality:
         description: 'Bitrate (kbps)'
         required: false
         type: choice
         options: ['320', '256', '192', '128']
         default: '320'
-
       output_folder:
         description: 'Output folder (relative to repo root)'
         required: false
         type: string
         default: 'downloads'
-
       upload_method:
         description: 'Upload method'
         required: false
         type: choice
         options: ['repository', 'release', 'temp_branch']
         default: 'repository'
-
       release_tag:
         description: 'Release tag (upload_method = release only)'
         required: false
         type: string
         default: ''
-
       branch_name:
         description: 'Temp branch name (upload_method = temp_branch only) – leave empty for auto-generation (run_<run_id>)'
         required: false
         type: string
         default: ''
-
       max_part_mb:
         description: 'Split files larger than N MB (0 = no split)'
         required: false
         type: number
         default: 90
-
       compress:
         description: 'Compress oversized files before splitting'
         required: false
         type: boolean
         default: false
-
       cookies:
-        description: |
-          YouTube cookies (Netscape format) to bypass bot detection.
-          Safer: store as repo secret YT_COOKIES — used automatically.
+        description: 'YouTube cookies (Netscape format)'
         required: false
         type: string
         default: ''
@@ -146,12 +126,12 @@ jobs:
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: zip nodejs npm curl
+          packages: zip nodejs npm curl python3-pip
           version: 1.0
 
       - name: Install tools
         run: |
-          pip install -q -U "yt-dlp[default]" spotdl
+          pip install -q -U "yt-dlp[default]" spotdl mutagen
           rm -rf /tmp/bgutil
           git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
           cd /tmp/bgutil/server && npm ci && npx tsc
@@ -185,12 +165,10 @@ jobs:
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          # Verify PO Token server
           curl -s http://localhost:4416/ping \
             && echo "✅ PO Token server ready" \
             || echo "::warning::PO Token server not responding"
 
-          # Build yt-dlp passthrough args
           YTDLP_ARGS="--extractor-args 'youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv' --js-runtimes node"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
@@ -206,20 +184,51 @@ jobs:
             --output "${{ github.event.inputs.output_folder }}/{artists} - {title}.{output-ext}" \
             --yt-dlp-args "$YTDLP_ARGS"
 
-      - name: Extract cover art from audio files
+      - name: Extract metadata using mutagen
         run: |
           cd "${{ github.event.inputs.output_folder }}"
-          # Find first audio file
+          python3 << 'EOF'
+          import os, json
+          from mutagen import File
+          audio_exts = {'.mp3', '.flac', '.m4a', '.opus'}
+          for f in os.listdir('.'):
+              if os.path.splitext(f)[1].lower() not in audio_exts:
+                  continue
+              audio = File(f)
+              if not audio:
+                  continue
+              info = {}
+              if hasattr(audio, 'get'):
+                  info['title'] = str(audio.get('title', [''])[0]) or os.path.splitext(f)[0]
+                  info['artist'] = str(audio.get('artist', ['Unknown Artist'])[0])
+                  info['album'] = str(audio.get('album', [''])[0])
+                  info['genre'] = str(audio.get('genre', [''])[0])
+                  year = audio.get('date') or audio.get('year')
+                  info['year'] = str(year[0])[:4] if year else ''
+                  track = audio.get('tracknumber')
+                  info['tracknumber'] = str(track[0]) if track else ''
+              else:
+                  info['title'] = os.path.splitext(f)[0]
+                  info['artist'] = 'Unknown Artist'
+              info['duration'] = int(audio.info.length) if hasattr(audio.info, 'length') else 0
+              with open(f + '.info.json', 'w') as jf:
+                  json.dump(info, jf, indent=2)
+              print(f"✅ Metadata for {f}")
+          EOF
+
+      - name: Extract cover art (fallback)
+        run: |
+          cd "${{ github.event.inputs.output_folder }}"
           AUDIO_FILE=$(find . -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | head -1)
           if [ -n "$AUDIO_FILE" ]; then
-            echo "Extracting cover from: $AUDIO_FILE"
             /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec copy cover.jpg -y 2>/dev/null || \
             /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec png cover.png -y 2>/dev/null || true
-            # Rename to a consistent name if extraction succeeded
             if [ -f cover.jpg ]; then
-              mv cover.jpg "cover_$(basename "$AUDIO_FILE" | sed 's/\.[^.]*$//').jpg"
+              BASE=$(basename "$AUDIO_FILE" | sed 's/\.[^.]*$//')
+              mv cover.jpg "${BASE}_cover.jpg"
             elif [ -f cover.png ]; then
-              mv cover.png "cover_$(basename "$AUDIO_FILE" | sed 's/\.[^.]*$//').png"
+              BASE=$(basename "$AUDIO_FILE" | sed 's/\.[^.]*$//')
+              mv cover.png "${BASE}_cover.png"
             fi
           fi
 
