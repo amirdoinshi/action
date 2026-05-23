@@ -398,7 +398,7 @@ jobs:
             $PLAYLIST_ARGS \
             $COOKIE_ARGS \
             --output-na-placeholder "" \
-            -o "$OUTPUT_FOLDER/%(playlist_index>%02d - |)s%(title)s [%(id)s].%(ext)s" \ \
+            -o "$OUTPUT_FOLDER/%(playlist_index)02d%(playlist_index& - )s%(title)s [%(id)s].%(ext)s" \ \
             $EXTRA_ARGS \
             "$URL"
           
