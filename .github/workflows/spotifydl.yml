@@ -65,6 +65,12 @@ on:
         type: number
         default: 90
 
+      compress:
+        description: 'Compress oversized files before splitting'
+        required: false
+        type: boolean
+        default: false
+
       cookies:
         description: |
           YouTube cookies (Netscape format) to bypass bot detection.
@@ -91,6 +97,7 @@ jobs:
       - name: Create or checkout temporary branch
         if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
         run: |
+          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
           git checkout -b "${{ github.event.inputs.branch_name }}"
           git push -u origin "${{ github.event.inputs.branch_name }}"
 
@@ -206,34 +213,41 @@ jobs:
           yt-dlp --version
           spotdl --version
 
-      - name: Split large files (repository / temp_branch)
-        if: >
-          (github.event.inputs.upload_method == 'repository' ||
-           github.event.inputs.upload_method == 'temp_branch') &&
-          github.event.inputs.max_part_mb != '0'
+      - name: Split oversized files (repository/temp_branch mode)
+        if: (github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch') && github.event.inputs.max_part_mb != '0'
         run: |
-          THRESH_MB="${{ github.event.inputs.max_part_mb }}"
+          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          THRESH_MB=${{ github.event.inputs.max_part_mb }}
           THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
-          for f in "${{ github.event.inputs.output_folder }}"/*; do
+          COMPRESS="${{ github.event.inputs.compress }}"
+
+          for f in "$OUTPUT_FOLDER"/*; do
             [ -f "$f" ] || continue
-            size=$(stat -c%s "$f")
-            if [ "$size" -gt "$THRESH_BYTES" ]; then
-              echo "Splitting $(basename "$f") into ${THRESH_MB}MB parts"
-              split -b "${THRESH_MB}m" -d -a 3 "$f" "${f}."
+            fs=$(stat -c%s "$f")
+            fname=$(basename "$f")
+            if [ "$THRESH_BYTES" -gt 0 ] && [ "$fs" -gt "$THRESH_BYTES" ]; then
+              if [ "$COMPRESS" = "true" ]; then
+                zip -j -s "${THRESH_MB}m" "$OUTPUT_FOLDER/${fname}.zip" "$f"
+              else
+                split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT_FOLDER/${fname}."
+              fi
               rm "$f"
             fi
           done
 
-      - name: Split large files (release — 2GB limit)
+      - name: Split oversized files (release mode — >2 GB)
         if: github.event.inputs.upload_method == 'release'
         run: |
-          LIMIT=$((2*1024*1024*1024))
-          for f in "${{ github.event.inputs.output_folder }}"/*; do
+          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          LIMIT_BYTES=$((2 * 1024 * 1024 * 1024))
+
+          for f in "$OUTPUT_FOLDER"/*; do
             [ -f "$f" ] || continue
-            size=$(stat -c%s "$f")
-            if [ "$size" -gt "$LIMIT" ]; then
-              echo "Splitting $(basename "$f") into 2GB parts"
-              split -b 2048m -d -a 3 "$f" "${f}."
+            fs=$(stat -c%s "$f")
+            fname=$(basename "$f")
+            if [ "$fs" -gt "$LIMIT_BYTES" ]; then
+              echo "Splitting $fname ($(( fs / 1024 / 1024 )) MB) into 2 GB parts..."
+              split -b 2048m -d -a 3 "$f" "$OUTPUT_FOLDER/${fname}."
               rm "$f"
             fi
           done
@@ -242,30 +256,45 @@ jobs:
         id: date
         run: echo "date=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
 
-      - name: Push to repository
+      - name: Push changes to repository
         if: github.event.inputs.upload_method == 'repository'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --local http.postBuffer 524288000
+          git config --local pack.window 1
+          git config --local pack.depth 0
+          git config --local core.compression 0
+          git config --local pack.compression 0
           git add "${{ github.event.inputs.output_folder }}/"
-          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || exit 0
-          for attempt in 1 2 3; do
-            git pull --rebase origin main
-            git push origin main && break
+          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || echo "Nothing to commit"
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          for push_attempt in 1 2 3; do
+            git pull --rebase origin "$CURRENT_BRANCH"
+            if git push origin "$CURRENT_BRANCH"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
             sleep 5
           done
 
-      - name: Push to temporary branch
+      - name: Push changes to temporary branch
         if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --local http.postBuffer 524288000
+          git config --local pack.window 1
+          git config --local pack.depth 0
+          git config --local core.compression 0
+          git config --local pack.compression 0
           git add "${{ github.event.inputs.output_folder }}/"
-          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || exit 0
-          for attempt in 1 2 3; do
-            git push origin "${{ github.event.inputs.branch_name }}" && break
+          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || echo "Nothing to commit"
+          for push_attempt in 1 2 3; do
+            if git push origin "${{ github.event.inputs.branch_name }}"; then
+              break
+            fi
+            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
             sleep 5
           done
 
