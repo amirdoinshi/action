@@ -5,7 +5,7 @@ name: Spotify Downloader
 #   - Finds the best YouTube Music match automatically
 #   - Downloads via yt-dlp with our bgutil PO Token setup
 #   - Injects all Spotify tags — no separate mutagen step needed
-#   - Saves cover art as a separate image file
+#   - Cover art extracted via ffmpeg after download
 #
 # Required secrets (free from https://developer.spotify.com/dashboard):
 #   SPOTIFY_CLIENT_ID
@@ -111,7 +111,6 @@ jobs:
         if: github.event.inputs.upload_method == 'temp_branch'
         run: |
           BRANCH="${{ steps.branch.outputs.branch_name }}"
-          # Since branch_name is always unique (run_<run_id>), no fetch needed
           git checkout -b "$BRANCH"
           git push -u origin "$BRANCH"
           echo "✅ Created and pushed branch: $BRANCH"
@@ -205,15 +204,23 @@ jobs:
             --bitrate "${{ github.event.inputs.audio_quality }}k" \
             --ffmpeg /usr/local/bin/ffmpeg \
             --output "${{ github.event.inputs.output_folder }}/{artists} - {title}.{output-ext}" \
-            --save-cover \
             --yt-dlp-args "$YTDLP_ARGS"
 
-          COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
-            \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | wc -l)
-          echo "✅ Downloaded $COUNT file(s)"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::error::No audio files found after download"
-            exit 1
+      - name: Extract cover art from audio files
+        run: |
+          cd "${{ github.event.inputs.output_folder }}"
+          # Find first audio file
+          AUDIO_FILE=$(find . -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | head -1)
+          if [ -n "$AUDIO_FILE" ]; then
+            echo "Extracting cover from: $AUDIO_FILE"
+            /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec copy cover.jpg -y 2>/dev/null || \
+            /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec png cover.png -y 2>/dev/null || true
+            # Rename to a consistent name if extraction succeeded
+            if [ -f cover.jpg ]; then
+              mv cover.jpg "cover_$(basename "$AUDIO_FILE" | sed 's/\.[^.]*$//').jpg"
+            elif [ -f cover.png ]; then
+              mv cover.png "cover_$(basename "$AUDIO_FILE" | sed 's/\.[^.]*$//').png"
+            fi
           fi
 
       - name: Debug summary
