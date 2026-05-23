@@ -82,6 +82,12 @@ jobs:
       - name: Create output directory
         run: mkdir -p "${{ github.event.inputs.output_folder }}"
 
+      - name: Cache npm (bgutil PO Token server)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-bgutil-v1.3.1
+
       - name: Cache Docker image
         id: cache-docker
         uses: actions/cache@v4
@@ -92,6 +98,23 @@ jobs:
       - name: Load Docker image from cache
         if: steps.cache-docker.outputs.cache-hit == 'true'
         run: docker load --input /tmp/downtify-img.tar
+
+      # ── Run bgutil PO Token server on the runner host ──
+      # The pip plugin (installed inside the container) talks to this server via
+      # the Docker bridge IP (172.17.0.1). This is exactly how the working
+      # youtube_adv_download workflow generates real PO Tokens.
+      - name: Build & start bgutil PO Token server
+        run: |
+          rm -rf /tmp/bgutil
+          git clone --depth 1 --branch 1.3.1 \
+            https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+            /tmp/bgutil
+          cd /tmp/bgutil/server && npm ci --prefer-offline && npx tsc
+          node /tmp/bgutil/server/build/main.js &
+          sleep 5
+          curl -s http://localhost:4416/ping \
+            && echo "✅ PO Token server ready" \
+            || echo "::warning::PO Token server not responding on :4416"
 
       # ── KEY FIX: volume-mount cookies (writable) + restart after pip so plugins load ──
       - name: Start downtify container
@@ -109,16 +132,18 @@ jobs:
           fi
 
           # ── Build YTDL_OPTIONS ──
-          # - cookiefile points to the volume-mounted path
-          # - NO ${pot} literal: bgutil registers itself as a yt-dlp plugin and
-          #   injects PO tokens automatically — passing a fake literal breaks auth
-          # - Mount is NOT :ro so yt-dlp can write updated cookies back (avoids OSError)
+          # - cookiefile: volume-mounted path (writable so yt-dlp can save cookie updates)
+          # - extractor_args: matches the working youtube_adv_download workflow exactly:
+          #     player_client — tries web_music first, falls back through web/tv/android/ios
+          #     po_token=web+tv — tells yt-dlp to request PO tokens for these clients;
+          #                       the bgutil pip plugin fetches them from the host server
+          #                       via YTDLP_PO_TOKEN_URL (set in docker run -e below)
           if [ -f /tmp/cookies.txt ]; then
-            YTDL_OPTS='{"concurrent_fragments":16,"cookiefile":"/cookies/cookies.txt"}'
+            YTDL_OPTS='{"concurrent_fragments":16,"cookiefile":"/cookies/cookies.txt","extractor_args":{"youtube":{"player_client":["web_music","web","tv","android","ios"],"po_token":["web+tv"]}}}'
             COOKIE_MOUNT="-v /tmp/cookies.txt:/cookies/cookies.txt"
             echo "✅ Cookies mount enabled (writable)"
           else
-            YTDL_OPTS='{"concurrent_fragments":16}'
+            YTDL_OPTS='{"concurrent_fragments":16,"extractor_args":{"youtube":{"player_client":["web_music","web","tv","android","ios"],"po_token":["web+tv"]}}}'
             COOKIE_MOUNT=""
           fi
 
@@ -128,6 +153,7 @@ jobs:
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
             $COOKIE_MOUNT \
             -e "YTDL_OPTIONS=$YTDL_OPTS" \
+            -e "YTDLP_PO_TOKEN_URL=http://172.17.0.1:4416" \
             ghcr.io/henriquesebastiao/downtify:latest
 
           # ── Wait for the web server to become ready ──
