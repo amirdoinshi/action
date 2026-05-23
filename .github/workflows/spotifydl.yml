@@ -1,45 +1,36 @@
-name: Spotify Downloader
+name: Spotify Downloader 
 
 on:
   workflow_dispatch:
     inputs:
       spotify_url:
-        description: 'Spotify URL (track, album, or playlist)'
+        description: 'Spotify URL (track, album, playlist)'
         required: true
         type: string
       output_format:
         description: 'Audio format'
         required: false
         type: choice
-        options:
-          - mp3
-          - flac
-          - m4a
-          - ogg
-          - opus
+        options: ['mp3', 'flac', 'm4a', 'ogg', 'opus']
         default: 'mp3'
       audio_quality:
-        description: 'Audio quality (kbps) – applies to MP3 only'
+        description: 'Bitrate (kbps) – MP3 only'
         required: false
         type: choice
-        options:
-          - '320'
-          - '256'
-          - '192'
-          - '128'
+        options: ['320', '256', '192', '128']
         default: '320'
       max_part_mb:
-        description: 'Maximum part size in MB for splitting (0 = no split)'
+        description: 'Split files larger than (MB, 0 = no split)'
         required: false
         type: number
         default: 90
       output_folder:
-        description: 'Folder to store downloads (relative to repo root)'
+        description: 'Output folder (relative to repo root)'
         required: false
         type: string
         default: 'downloads'
       custom_filename:
-        description: 'Custom filename (only for a single track; extension added automatically)'
+        description: 'Custom filename (only for a single track)'
         required: false
         type: string
         default: ''
@@ -47,18 +38,15 @@ on:
         description: 'Upload method'
         required: false
         type: choice
-        options:
-          - repository
-          - release
-          - temp_branch
+        options: ['repository', 'release', 'temp_branch']
         default: 'repository'
       release_tag:
-        description: 'Release tag (only used when upload_method = release)'
+        description: 'Release tag (for release method)'
         required: false
         type: string
         default: ''
       branch_name:
-        description: 'Temporary branch name (only used when upload_method = temp_branch)'
+        description: 'Temp branch name (for temp_branch)'
         required: false
         type: string
         default: ''
@@ -85,8 +73,7 @@ jobs:
           git push -u origin "${{ github.event.inputs.branch_name }}"
 
       - name: 📁 Create output directory
-        run: |
-          mkdir -p "${{ github.event.inputs.output_folder }}"
+        run: mkdir -p "${{ github.event.inputs.output_folder }}"
 
       - name: 🐳 Cache Docker image
         id: cache-docker
@@ -102,128 +89,175 @@ jobs:
       - name: 🐳 Start downtify container
         id: start-downtify
         run: |
-          # If the image wasn't cached, this will pull it first
           docker run -d \
             --name downtify \
             -p 8000:8000 \
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
+            -e YTDL_OPTIONS='{"concurrent_fragments": 16}' \
             ghcr.io/henriquesebastiao/downtify:latest
-          echo "⏳ Waiting for the web server to be ready..."
+
+          echo "⏳ Waiting for web server..."
           for i in {1..30}; do
             if curl -s -f http://localhost:8000 > /dev/null 2>&1; then
-              echo "✅ Downtify is ready"
+              echo "✅ Ready"
               break
             fi
-            echo "   Attempt $i/30 – still waiting..."
             sleep 2
           done
 
-      - name: 🚀 Submit download job
-        id: download
-        run: |
-          SPOTIFY_URL="${{ github.event.inputs.spotify_url }}"
-          FORMAT="${{ github.event.inputs.output_format }}"
-          QUALITY="${{ github.event.inputs.audio_quality }}"
+          echo "🔄 Upgrade yt-dlp inside container"
+          docker exec downtify pip install --upgrade yt-dlp
 
-          echo "📡 Submitting download request to downtify API..."
-
-          curl -X POST "http://localhost:8000/api/download/url" \
+          echo "🎵 Apply format and bitrate settings via API"
+          curl -X POST http://localhost:8000/api/settings/update \
             -H "Content-Type: application/json" \
-            -d "{\"url\":\"${SPOTIFY_URL}\"}"
+            -d "{\"format\":\"${{ github.event.inputs.output_format }}\",\"bitrate\":\"${{ github.event.inputs.audio_quality }}\"}"
 
-          echo "✅ Download job submitted"
-          echo "🕒 Waiting for the download to finish – this may take a while..."
+      - name: 🔍 Detect if playlist/album
+        id: detect
+        run: |
+          URL="${{ github.event.inputs.spotify_url }}"
+          if [[ "$URL" =~ /playlist/|/album/ ]]; then
+            echo "is_playlist=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_playlist=false" >> $GITHUB_OUTPUT
+          fi
 
-          TIMEOUT=600
-          INTERVAL=5
+      - name: 📥 Single track (POST /api/download/url)
+        if: steps.detect.outputs.is_playlist == 'false'
+        run: |
+          echo "📡 Downloading single track..."
+          curl -X POST http://localhost:8000/api/download/url \
+            -H "Content-Type: application/json" \
+            -d "{\"url\":\"${{ github.event.inputs.spotify_url }}\"}"
+
+          # Wait for file to appear
+          TIMEOUT=300
           ELAPSED=0
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            FILE_COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) 2>/dev/null | wc -l)
-            if [ $FILE_COUNT -gt 0 ]; then
-              echo "✅ Download completed – $FILE_COUNT audio file(s) found"
+            COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
+            if [ $COUNT -gt 0 ]; then
+              echo "✅ Download completed – $COUNT file(s)"
               break
             fi
-            echo "   Still waiting... ($ELAPSED seconds elapsed)"
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
           done
+          if [ $COUNT -eq 0 ]; then
+            echo "::error::No file downloaded"
+            docker logs downtify
+            exit 1
+          fi
 
-          if [ $FILE_COUNT -eq 0 ]; then
-            echo "::error::No audio files appeared after $TIMEOUT seconds – download likely failed"
+      - name: 📥 Playlist/album – resolve metadata
+        if: steps.detect.outputs.is_playlist == 'true'
+        id: resolve
+        run: |
+          echo "📡 Resolving playlist/album metadata from Spotify embed..."
+          curl -s "http://localhost:8000/api/song/url?url=${{ github.event.inputs.spotify_url }}" > /tmp/tracks.json
+          cat /tmp/tracks.json
+          # Count tracks
+          TRACK_COUNT=$(jq 'if type=="array" then length else 1 end' /tmp/tracks.json)
+          echo "track_count=$TRACK_COUNT" >> $GITHUB_OUTPUT
+
+      - name: 📥 Playlist/album – batch download (parallel, up to 4 concurrent)
+        if: steps.detect.outputs.is_playlist == 'true'
+        run: |
+          echo "🚀 Submitting batch download (parallel, up to 4 at once)..."
+          curl -X POST http://localhost:8000/api/download/batch \
+            -H "Content-Type: application/json" \
+            -d "{\"playlist_url\":\"${{ github.event.inputs.spotify_url }}\",\"generate_m3u\":true}"
+
+          # Wait for all tracks to finish (monitor via file count)
+          EXPECTED=${{ steps.resolve.outputs.track_count }}
+          TIMEOUT=900
+          ELAPSED=0
+          PREV_COUNT=0
+          STABLE=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
+            if [ $COUNT -eq $EXPECTED ]; then
+              echo "✅ All $EXPECTED tracks downloaded"
+              break
+            fi
+            if [ $COUNT -gt 0 ] && [ $COUNT -eq $PREV_COUNT ]; then
+              STABLE=$((STABLE + 1))
+              if [ $STABLE -ge 5 ]; then
+                echo "⚠️ No new files for 50 seconds – assuming download finished with $COUNT/$EXPECTED tracks"
+                break
+              fi
+            else
+              STABLE=0
+            fi
+            PREV_COUNT=$COUNT
+            echo "   Downloaded $COUNT / $EXPECTED – waiting..."
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+          done
+          if [ $COUNT -eq 0 ]; then
+            echo "::error::No files downloaded"
             docker logs downtify
             exit 1
           fi
 
       - name: ✏️ Apply custom filename (single file only)
-        if: github.event.inputs.custom_filename != ''
+        if: github.event.inputs.custom_filename != '' && steps.detect.outputs.is_playlist == 'false'
         run: |
-          CUSTOM_NAME="${{ github.event.inputs.custom_filename }}"
-          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          CUSTOM="${{ github.event.inputs.custom_filename }}"
           EXT="${{ github.event.inputs.output_format }}"
-
-          FILE_COUNT=$(find "$OUTPUT_FOLDER" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
-
-          if [ $FILE_COUNT -eq 1 ]; then
-            OLD_NAME=$(find "$OUTPUT_FOLDER" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | head -1)
-            NEW_NAME="$OUTPUT_FOLDER/${CUSTOM_NAME}.${EXT}"
-            mv "$OLD_NAME" "$NEW_NAME"
-            echo "✏️ Renamed to: ${CUSTOM_NAME}.${EXT}"
-          else
-            echo "⚠️ Custom filename ignored because $FILE_COUNT files were downloaded."
+          OUTPUT="${{ github.event.inputs.output_folder }}"
+          OLD=$(find "$OUTPUT" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | head -1)
+          if [ -f "$OLD" ]; then
+            mv "$OLD" "$OUTPUT/${CUSTOM}.${EXT}"
+            echo "✏️ Renamed to ${CUSTOM}.${EXT}"
           fi
 
-      - name: 🛑 Stop downtify container
+      - name: 🛑 Stop container
         if: always()
-        id: stop-downtify
         run: docker stop downtify
 
       - name: 🐳 Save Docker image to cache
         if: steps.cache-docker.outputs.cache-hit != 'true'
         run: docker save ghcr.io/henriquesebastiao/downtify:latest -o /tmp/downtify-img.tar
 
-      - name: 🛑 Remove downtify container
+      - name: 🛑 Remove container
         if: always()
         run: docker rm downtify
 
       - name: ✂️ Split large files (repository / temp_branch)
         if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
         run: |
-          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
+          OUTPUT="${{ github.event.inputs.output_folder }}"
           THRESH_MB="${{ github.event.inputs.max_part_mb }}"
+          if [ "$THRESH_MB" -le 0 ]; then exit 0; fi
           THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
-
-          for f in "$OUTPUT_FOLDER"/*; do
+          for f in "$OUTPUT"/*; do
             [ -f "$f" ] || continue
-            fs=$(stat -c%s "$f")
-            fname=$(basename "$f")
-            if [ "$THRESH_MB" -gt 0 ] && [ "$fs" -gt "$THRESH_BYTES" ]; then
-              echo "🔪 Splitting $fname ($(( fs / 1024 / 1024 )) MB) into ${THRESH_MB} MB parts..."
-              split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT_FOLDER/${fname}."
+            size=$(stat -c%s "$f")
+            if [ $size -gt $THRESH_BYTES ]; then
+              echo "🔪 Splitting $(basename "$f") into ${THRESH_MB}MB parts"
+              split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
               rm "$f"
-              echo "✅ Split completed"
             fi
           done
 
-      - name: ✂️ Split large files (release – max 2 GB)
+      - name: ✂️ Split large files (release – 2GB limit)
         if: github.event.inputs.upload_method == 'release'
         run: |
-          OUTPUT_FOLDER="${{ github.event.inputs.output_folder }}"
-          LIMIT_BYTES=$((2 * 1024 * 1024 * 1024))
-
-          for f in "$OUTPUT_FOLDER"/*; do
+          OUTPUT="${{ github.event.inputs.output_folder }}"
+          LIMIT=$((2*1024*1024*1024))
+          for f in "$OUTPUT"/*; do
             [ -f "$f" ] || continue
-            fs=$(stat -c%s "$f")
-            fname=$(basename "$f")
-            if [ "$fs" -gt "$LIMIT_BYTES" ]; then
-              echo "🔪 Splitting $fname ($(( fs / 1024 / 1024 )) MB) into 2 GB parts..."
-              split -b 2048m -d -a 3 "$f" "$OUTPUT_FOLDER/${fname}."
+            size=$(stat -c%s "$f")
+            if [ $size -gt $LIMIT ]; then
+              echo "🔪 Splitting $(basename "$f") into 2GB parts"
+              split -b 2048m -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
               rm "$f"
-              echo "✅ Split completed"
             fi
           done
 
-      - name: 📅 Get current date
-        id: get_date
+      - name: 📅 Get date
+        id: date
         run: echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
       - name: 📤 Push to repository
@@ -232,19 +266,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config --local http.postBuffer 524288000
-          git config --local pack.window 1
-          git config --local pack.depth 0
-          git config --local core.compression 0
-          git config --local pack.compression 0
           git add "${{ github.event.inputs.output_folder }}/"
-          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || echo "Nothing to commit"
-          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          for push_attempt in 1 2 3; do
-            git pull --rebase origin "$CURRENT_BRANCH"
-            if git push origin "$CURRENT_BRANCH"; then
-              break
-            fi
-            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || exit 0
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then break; fi
             sleep 5
           done
 
@@ -253,18 +279,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local http.postBuffer 524288000
-          git config --local pack.window 1
-          git config --local pack.depth 0
-          git config --local core.compression 0
-          git config --local pack.compression 0
           git add "${{ github.event.inputs.output_folder }}/"
-          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || echo "Nothing to commit"
-          for push_attempt in 1 2 3; do
-            if git push origin "${{ github.event.inputs.branch_name }}"; then
-              break
-            fi
-            echo "⚠️ Push attempt $push_attempt failed, retrying in 5s..."
+          git commit -m "🎵 Spotify download: ${{ github.event.inputs.spotify_url }} [skip ci]" || exit 0
+          for attempt in 1 2 3; do
+            if git push origin "${{ github.event.inputs.branch_name }}"; then break; fi
             sleep 5
           done
 
@@ -280,7 +298,7 @@ jobs:
             URL: ${{ github.event.inputs.spotify_url }}
             Format: ${{ github.event.inputs.output_format }}
             Quality: ${{ github.event.inputs.audio_quality }} kbps
-            Downloaded on: ${{ steps.get_date.outputs.date }}
+            Date: ${{ steps.date.outputs.date }}
 
             Powered by Meli-Action ⚡
           files: ${{ github.event.inputs.output_folder }}/*
