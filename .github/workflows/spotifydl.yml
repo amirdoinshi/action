@@ -97,19 +97,30 @@ jobs:
             ghcr.io/henriquesebastiao/downtify:latest
 
           echo "⏳ Waiting for web server..."
+          READY=0
           for i in {1..30}; do
-            if curl -s -f http://localhost:8000 > /dev/null 2>&1; then
-              echo "✅ Ready"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --connect-timeout 3 --max-time 5 http://localhost:8000 2>/dev/null || echo "000")
+            if [[ "$HTTP_CODE" =~ ^[23] ]]; then
+              echo "✅ Ready (HTTP $HTTP_CODE)"
+              READY=1
               break
             fi
+            echo "   attempt $i/30 – HTTP $HTTP_CODE – retrying in 2s..."
             sleep 2
           done
+          if [ $READY -eq 0 ]; then
+            echo "::error::Downtify never became ready after 60s"
+            docker logs downtify --tail 50
+            exit 1
+          fi
 
           echo "🔄 Upgrade yt-dlp inside container"
-          docker exec downtify pip install --upgrade yt-dlp
+          docker exec downtify pip install --upgrade yt-dlp --quiet
 
           echo "🎵 Apply format and bitrate settings via API"
-          curl -X POST http://localhost:8000/api/settings/update \
+          curl -s -o /dev/null --connect-timeout 10 --max-time 15 \
+            -X POST http://localhost:8000/api/settings/update \
             -H "Content-Type: application/json" \
             -d "{\"format\":\"${{ github.event.inputs.output_format }}\",\"bitrate\":\"${{ github.event.inputs.audio_quality }}\"}"
 
@@ -129,27 +140,26 @@ jobs:
       - name: 📥 Single track (POST /api/download/url)
         if: steps.detect.outputs.is_playlist == 'false'
         run: |
-          ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
-          echo "📡 Downloading single track (URL as query param)..."
-          curl -X POST "http://localhost:8000/api/download/url?url=${ENCODED_URL}" \
+          SPOTIFY_URL="${{ github.event.inputs.spotify_url }}"
+          echo "📡 Downloading single track (url in request body)..."
+          # POST /api/download/url blocks until the download is complete
+          HTTP_CODE=$(curl -s -o /tmp/dl_response.json -w "%{http_code}" \
+            --connect-timeout 10 --max-time 600 \
+            -X POST "http://localhost:8000/api/download/url" \
             -H "Content-Type: application/json" \
-            -d '{}'
-
-          # Wait for file to appear
-          TIMEOUT=600
-          ELAPSED=0
-          while [ $ELAPSED -lt $TIMEOUT ]; do
-            COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
-            if [ $COUNT -gt 0 ]; then
-              echo "✅ Download completed – $COUNT file(s)"
-              break
-            fi
-            sleep 5
-            ELAPSED=$((ELAPSED + 5))
-          done
+            -d "{\"url\":\"${SPOTIFY_URL}\"}")
+          echo "   API response code: $HTTP_CODE"
+          cat /tmp/dl_response.json || true
+          if [[ ! "$HTTP_CODE" =~ ^[23] ]]; then
+            echo "::error::Download API returned HTTP $HTTP_CODE"
+            docker logs downtify --tail 50
+            exit 1
+          fi
+          COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
+          echo "✅ Download completed – $COUNT file(s)"
           if [ $COUNT -eq 0 ]; then
-            echo "::error::No file downloaded after $TIMEOUT seconds"
-            docker logs downtify --tail 100
+            echo "::error::API succeeded but no audio file found in output folder"
+            docker logs downtify --tail 50
             exit 1
           fi
 
@@ -162,7 +172,7 @@ jobs:
         run: |
           ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
           echo "📡 Resolving playlist/album metadata from Spotify embed..."
-          curl -s "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
+          curl -s --connect-timeout 10 --max-time 30 "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
           cat /tmp/tracks.json
           TRACK_COUNT=$(jq 'if type=="array" then length else 1 end' /tmp/tracks.json)
           echo "track_count=$TRACK_COUNT" >> $GITHUB_OUTPUT
@@ -174,9 +184,24 @@ jobs:
         if: steps.detect.outputs.is_playlist == 'true'
         run: |
           echo "🚀 Submitting batch download (parallel, up to 4 at once)..."
-          curl -X POST http://localhost:8000/api/download/batch \
+          # Build request body: songs array from resolve step + playlist_url for folder/M3U naming
+          BATCH_BODY=$(jq -n \
+            --argjson songs "$(cat /tmp/tracks.json | jq 'if type=="array" then . else [.] end')" \
+            --arg playlist_url "${{ github.event.inputs.spotify_url }}" \
+            '{songs: $songs, playlist_url: $playlist_url, generate_m3u: true}')
+
+          HTTP_CODE=$(curl -s -o /tmp/batch_response.json -w "%{http_code}" \
+            --connect-timeout 10 --max-time 60 \
+            -X POST http://localhost:8000/api/download/batch \
             -H "Content-Type: application/json" \
-            -d "{\"playlist_url\":\"${{ github.event.inputs.spotify_url }}\",\"generate_m3u\":true}"
+            -d "$BATCH_BODY")
+          echo "   Batch API response: $HTTP_CODE"
+          cat /tmp/batch_response.json || true
+          if [[ ! "$HTTP_CODE" =~ ^[23] ]]; then
+            echo "::error::Batch API returned HTTP $HTTP_CODE"
+            docker logs downtify --tail 50
+            exit 1
+          fi
 
           EXPECTED=${{ steps.resolve.outputs.track_count }}
           TIMEOUT=1200
