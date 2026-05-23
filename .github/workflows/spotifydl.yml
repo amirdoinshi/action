@@ -152,9 +152,7 @@ jobs:
         run: |
           pip install -q -U "yt-dlp[default]" mutagen
           rm -rf /tmp/bgutil
-          git clone --depth 1 --branch 1.3.1 \\
-            https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \\
-            /tmp/bgutil
+          git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
           cd /tmp/bgutil/server && npm ci && npx tsc
 
       - name: Start PO Token provider server
