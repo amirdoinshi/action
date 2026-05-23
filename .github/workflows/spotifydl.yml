@@ -1,4 +1,4 @@
-name: Spotify Downloader (Downtify – no API keys)
+name: Spotify Downloader
 
 on:
   workflow_dispatch:
@@ -60,33 +60,33 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 📂 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
 
-      - name: 🔧 Create or checkout temporary branch
+      - name: Create or checkout temporary branch
         if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
         run: |
           git checkout -b "${{ github.event.inputs.branch_name }}"
           git push -u origin "${{ github.event.inputs.branch_name }}"
 
-      - name: 📁 Create output directory
+      - name: Create output directory
         run: mkdir -p "${{ github.event.inputs.output_folder }}"
 
-      - name: 🐳 Cache Docker image
+      - name: Cache Docker image
         id: cache-docker
         uses: actions/cache@v4
         with:
           path: /tmp/downtify-img.tar
           key: ${{ runner.os }}-downtify-latest
 
-      - name: 🐳 Load Docker image from cache
+      - name: Load Docker image from cache
         if: steps.cache-docker.outputs.cache-hit == 'true'
         run: docker load --input /tmp/downtify-img.tar
 
-      - name: 🐳 Start downtify container
+      - name: Start downtify container
         id: start-downtify
         run: |
           docker run -d \
@@ -96,17 +96,17 @@ jobs:
             -e YTDL_OPTIONS='{"concurrent_fragments": 16}' \
             ghcr.io/henriquesebastiao/downtify:latest
 
-          echo "⏳ Waiting for web server..."
+          echo "Waiting for web server..."
           READY=0
           for i in {1..30}; do
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               --connect-timeout 3 --max-time 5 http://localhost:8000 2>/dev/null || echo "000")
             if [[ "$HTTP_CODE" =~ ^[23] ]]; then
-              echo "✅ Ready (HTTP $HTTP_CODE)"
+              echo "Server ready (HTTP $HTTP_CODE)"
               READY=1
               break
             fi
-            echo "   attempt $i/30 – HTTP $HTTP_CODE – retrying in 2s..."
+            echo "  attempt $i/30 - HTTP $HTTP_CODE - retrying..."
             sleep 2
           done
           if [ $READY -eq 0 ]; then
@@ -115,16 +115,16 @@ jobs:
             exit 1
           fi
 
-          echo "🔄 Upgrade yt-dlp inside container"
+          echo "Upgrading yt-dlp inside container"
           docker exec downtify pip install --upgrade yt-dlp --quiet
 
-          echo "🎵 Apply format and bitrate settings via API"
+          echo "Applying format and bitrate settings"
           curl -s -o /dev/null --connect-timeout 10 --max-time 15 \
             -X POST http://localhost:8000/api/settings/update \
             -H "Content-Type: application/json" \
             -d "{\"format\":\"${{ github.event.inputs.output_format }}\",\"bitrate\":\"${{ github.event.inputs.audio_quality }}\"}"
 
-      - name: 🔍 Detect if playlist/album
+      - name: Detect if playlist/album
         id: detect
         run: |
           URL="${{ github.event.inputs.spotify_url }}"
@@ -137,27 +137,24 @@ jobs:
       # ----------------------------------------------
       # SINGLE TRACK – using query parameter (FIXED)
       # ----------------------------------------------
-      - name: 📥 Single track (POST /api/download/url)
+      - name: Single track (POST /api/download/url)
         if: steps.detect.outputs.is_playlist == 'false'
         run: |
-          SPOTIFY_URL="${{ github.event.inputs.spotify_url }}"
-          echo "📡 Downloading single track (url in request body)..."
-          # POST /api/download/url blocks until the download is complete
+          ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
+          echo "Downloading single track..."
+          # /api/download/url blocks until complete; url is a query parameter
           HTTP_CODE=$(curl -s -o /tmp/dl_response.json -w "%{http_code}" \
             --connect-timeout 10 --max-time 600 \
-            -X POST "http://localhost:8000/api/download/url" \
-            -H "Content-Type: application/json" \
-            -d "{\"url\":\"${SPOTIFY_URL}\"}")
-          echo "   API response code: $HTTP_CODE"
-          cat /tmp/dl_response.json || true
+            -X POST "http://localhost:8000/api/download/url?url=${ENCODED_URL}")
+          echo "  API response: $HTTP_CODE - $(cat /tmp/dl_response.json)"
           if [[ ! "$HTTP_CODE" =~ ^[23] ]]; then
             echo "::error::Download API returned HTTP $HTTP_CODE"
             docker logs downtify --tail 50
             exit 1
           fi
           COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
-          echo "✅ Download completed – $COUNT file(s)"
-          if [ $COUNT -eq 0 ]; then
+          echo "Download complete - $COUNT file(s)"
+          if [ "$COUNT" -eq 0 ]; then
             echo "::error::API succeeded but no audio file found in output folder"
             docker logs downtify --tail 50
             exit 1
@@ -166,13 +163,13 @@ jobs:
       # ----------------------------------------------
       # PLAYLIST / ALBUM – resolve metadata
       # ----------------------------------------------
-      - name: 📥 Playlist/album – resolve metadata
+      - name: Playlist/album – resolve metadata
         if: steps.detect.outputs.is_playlist == 'true'
         id: resolve
         run: |
           ENCODED_URL=$(printf '%s' "${{ github.event.inputs.spotify_url }}" | jq -sRr @uri)
-          echo "📡 Resolving playlist/album metadata from Spotify embed..."
-          curl -s --connect-timeout 10 --max-time 30 "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
+          echo " Resolving playlist/album metadata from Spotify embed..."
+          curl -s "http://localhost:8000/api/song/url?url=${ENCODED_URL}" > /tmp/tracks.json
           cat /tmp/tracks.json
           TRACK_COUNT=$(jq 'if type=="array" then length else 1 end' /tmp/tracks.json)
           echo "track_count=$TRACK_COUNT" >> $GITHUB_OUTPUT
@@ -180,23 +177,21 @@ jobs:
       # ----------------------------------------------
       # PLAYLIST / ALBUM – batch download (parallel)
       # ----------------------------------------------
-      - name: 📥 Playlist/album – batch download (parallel, up to 4 concurrent)
+      - name: Playlist/album – batch download (parallel, up to 4 concurrent)
         if: steps.detect.outputs.is_playlist == 'true'
         run: |
-          echo "🚀 Submitting batch download (parallel, up to 4 at once)..."
-          # Build request body: songs array from resolve step + playlist_url for folder/M3U naming
+          echo "Submitting batch download..."
+          # Build request: songs array from resolve step + playlist_url for folder/M3U naming
           BATCH_BODY=$(jq -n \
-            --argjson songs "$(cat /tmp/tracks.json | jq 'if type=="array" then . else [.] end')" \
+            --argjson songs "$(jq 'if type=="array" then . else [.] end' /tmp/tracks.json)" \
             --arg playlist_url "${{ github.event.inputs.spotify_url }}" \
             '{songs: $songs, playlist_url: $playlist_url, generate_m3u: true}')
-
           HTTP_CODE=$(curl -s -o /tmp/batch_response.json -w "%{http_code}" \
             --connect-timeout 10 --max-time 60 \
             -X POST http://localhost:8000/api/download/batch \
             -H "Content-Type: application/json" \
             -d "$BATCH_BODY")
-          echo "   Batch API response: $HTTP_CODE"
-          cat /tmp/batch_response.json || true
+          echo "  Batch API response: $HTTP_CODE - $(cat /tmp/batch_response.json)"
           if [[ ! "$HTTP_CODE" =~ ^[23] ]]; then
             echo "::error::Batch API returned HTTP $HTTP_CODE"
             docker logs downtify --tail 50
@@ -211,20 +206,20 @@ jobs:
           while [ $ELAPSED -lt $TIMEOUT ]; do
             COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | wc -l)
             if [ $COUNT -eq $EXPECTED ]; then
-              echo "✅ All $EXPECTED tracks downloaded"
+              echo " All $EXPECTED tracks downloaded"
               break
             fi
             if [ $COUNT -gt 0 ] && [ $COUNT -eq $PREV_COUNT ]; then
               STABLE=$((STABLE + 1))
               if [ $STABLE -ge 5 ]; then
-                echo "⚠️ No new files for 50 seconds – assuming download finished with $COUNT/$EXPECTED tracks"
+                echo " No new files for 50 seconds – assuming download finished with $COUNT/$EXPECTED tracks"
                 break
               fi
             else
               STABLE=0
             fi
             PREV_COUNT=$COUNT
-            echo "   Downloaded $COUNT / $EXPECTED – waiting..."
+            echo " Downloaded $COUNT / $EXPECTED – waiting..."
             sleep 10
             ELAPSED=$((ELAPSED + 10))
           done
@@ -237,7 +232,7 @@ jobs:
       # ----------------------------------------------
       # POST-PROCESSING
       # ----------------------------------------------
-      - name: ✏️ Apply custom filename (single file only)
+      - name: Apply custom filename (single file only)
         if: github.event.inputs.custom_filename != '' && steps.detect.outputs.is_playlist == 'false'
         run: |
           CUSTOM="${{ github.event.inputs.custom_filename }}"
@@ -246,22 +241,22 @@ jobs:
           OLD=$(find "$OUTPUT" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.ogg" -o -name "*.opus" \) | head -1)
           if [ -f "$OLD" ]; then
             mv "$OLD" "$OUTPUT/${CUSTOM}.${EXT}"
-            echo "✏️ Renamed to ${CUSTOM}.${EXT}"
+            echo " Renamed to ${CUSTOM}.${EXT}"
           fi
 
-      - name: 🛑 Stop container
+      - name: Stop container
         if: always()
         run: docker stop downtify
 
-      - name: 🐳 Save Docker image to cache
+      - name: Save Docker image to cache
         if: steps.cache-docker.outputs.cache-hit != 'true'
         run: docker save ghcr.io/henriquesebastiao/downtify:latest -o /tmp/downtify-img.tar
 
-      - name: 🛑 Remove container
+      - name: Remove container
         if: always()
         run: docker rm downtify
 
-      - name: ✂️ Split large files (repository / temp_branch)
+      - name: Split large files (repository / temp_branch)
         if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
         run: |
           OUTPUT="${{ github.event.inputs.output_folder }}"
@@ -272,13 +267,13 @@ jobs:
             [ -f "$f" ] || continue
             size=$(stat -c%s "$f")
             if [ $size -gt $THRESH_BYTES ]; then
-              echo "🔪 Splitting $(basename "$f") into ${THRESH_MB}MB parts"
+              echo " Splitting $(basename "$f") into ${THRESH_MB}MB parts"
               split -b "${THRESH_MB}m" -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
               rm "$f"
             fi
           done
 
-      - name: ✂️ Split large files (release – 2GB limit)
+      - name: Split large files (release – 2GB limit)
         if: github.event.inputs.upload_method == 'release'
         run: |
           OUTPUT="${{ github.event.inputs.output_folder }}"
@@ -287,17 +282,17 @@ jobs:
             [ -f "$f" ] || continue
             size=$(stat -c%s "$f")
             if [ $size -gt $LIMIT ]; then
-              echo "🔪 Splitting $(basename "$f") into 2GB parts"
+              echo " Splitting $(basename "$f") into 2GB parts"
               split -b 2048m -d -a 3 "$f" "$OUTPUT/$(basename "$f")."
               rm "$f"
             fi
           done
 
-      - name: 📅 Get date
+      - name: Get date
         id: date
         run: echo "date=$(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-      - name: 📤 Push to repository
+      - name: Push to repository
         if: github.event.inputs.upload_method == 'repository'
         run: |
           git config user.name "github-actions[bot]"
@@ -311,7 +306,7 @@ jobs:
             sleep 5
           done
 
-      - name: 📤 Push to temporary branch
+      - name: Push to temporary branch
         if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
         run: |
           git config user.name "github-actions[bot]"
@@ -323,7 +318,7 @@ jobs:
             sleep 5
           done
 
-      - name: 📤 Upload to GitHub Releases
+      - name: Upload to GitHub Releases
         if: github.event.inputs.upload_method == 'release'
         uses: softprops/action-gh-release@v2
         with:
