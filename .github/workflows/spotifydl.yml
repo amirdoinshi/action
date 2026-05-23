@@ -261,52 +261,49 @@ jobs:
           jq -c '.[]' /tmp/tracks.json | while IFS= read -r TRACK; do
             INDEX=$((INDEX + 1))
 
-            # Extract YouTube URL — Downtify returns different field names depending on version
-            YT_URL=$(echo "$TRACK" | jq -r '
-              .youtube_url //
-              .yt_url //
-              .url //
-              empty
-            ' | grep -E '^https?://' | head -1)
-
-            if [ -z "$YT_URL" ]; then
-              echo "::warning::Track $INDEX has no YouTube URL — skipping"
-              echo "$TRACK" | jq '.'
-              continue
-            fi
-
-            # Extract Spotify metadata for mutagen
+            # Extract Spotify metadata
+            # NOTE: Downtify artists field is a plain string array ["AaRON"], not objects
             TITLE=$(echo "$TRACK" | jq -r '.name // .title // "Unknown Title"')
             ARTIST=$(echo "$TRACK" | jq -r '
-              if .artists then (.artists | if type == "array" then map(.name // .) | join(", ") else . end)
+              if (.artists | type) == "array" then
+                (.artists | map(if type == "object" then .name else . end) | join(", "))
               elif .artist then .artist
               else "Unknown Artist"
               end
             ')
-            ALBUM=$(echo "$TRACK" | jq -r '.album.name // .album // "Unknown Album"')
+            ALBUM=$(echo "$TRACK" | jq -r '.album_name // .album.name // .album // ""')
             ALBUM_ARTIST=$(echo "$TRACK" | jq -r '
               .album.artists[0].name //
               .album_artist //
-              .artists[0].name //
+              (if (.artists | type) == "array" then
+                (.artists[0] | if type == "object" then .name else . end)
+               else .artist end) //
               "Unknown"
             ')
-            TRACK_NUM=$(echo "$TRACK" | jq -r '.track_number // .disc_number // 0')
+            TRACK_NUM=$(echo "$TRACK" | jq -r '.track_number // 0')
             TOTAL_TRACKS=$(echo "$TRACK" | jq -r '.album.total_tracks // 0')
-            COVER_URL=$(echo "$TRACK" | jq -r '
-              .album.images[0].url //
-              .cover_url //
-              .thumbnail //
-              empty
-            ' | head -1)
-            SPOTIFY_ID=$(echo "$TRACK" | jq -r '.id // empty')
-            YEAR=$(echo "$TRACK" | jq -r '
-              .album.release_date //
-              .release_date //
-              empty
-            ' | grep -oE '^[0-9]{4}' | head -1)
+            COVER_URL=$(echo "$TRACK" | jq -r '.cover_url // .album.images[0].url // .thumbnail // ""')
+            SPOTIFY_ID=$(echo "$TRACK" | jq -r '.song_id // .id // ""')
+            YEAR=$(echo "$TRACK" | jq -r '.year // .release_date // ""' | grep -oE '^[0-9]{4}' | head -1)
 
-            # Build safe filename key: use Spotify ID if available, else index
             KEY="${SPOTIFY_ID:-track_${INDEX}}"
+
+            echo "──────────────────────────────"
+            echo "[$INDEX/$TRACK_COUNT] $ARTIST – $TITLE  (year: ${YEAR:-?})"
+
+            # Downtify /api/song/url returns Spotify metadata only — no YouTube URL.
+            # Search YouTube Music directly using yt-dlp's ytmsearch extractor.
+            SEARCH_QUERY="ytmsearch1:${ARTIST} ${TITLE}"
+            echo "  Searching YT Music: $SEARCH_QUERY"
+
+            # Determine output filename
+            if [ -n "$CUSTOM" ] && [ "$TRACK_COUNT" -eq 1 ]; then
+              OUTFILE="$OUTPUT/${CUSTOM}.%(ext)s"
+            else
+              SAFE_TITLE=$(echo "$TITLE" | tr -d '/<>:"\|?*' | cut -c1-100)
+              SAFE_ARTIST=$(echo "$ARTIST" | tr -d '/<>:"\|?*' | cut -c1-60)
+              OUTFILE="$OUTPUT/${SAFE_ARTIST} - ${SAFE_TITLE} [%(id)s].%(ext)s"
+            fi
 
             # Save metadata JSON for the mutagen step
             jq -n \
@@ -318,27 +315,13 @@ jobs:
               --arg total_tracks "$TOTAL_TRACKS" \
               --arg cover_url "$COVER_URL" \
               --arg year "$YEAR" \
-              --arg yt_url "$YT_URL" \
               --arg key "$KEY" \
               '{
                 title: $title, artist: $artist, album: $album,
                 album_artist: $album_artist, track_num: $track_num,
                 total_tracks: $total_tracks, cover_url: $cover_url,
-                year: $year, yt_url: $yt_url, key: $key
+                year: $year, key: $key
               }' > "/tmp/track_meta/${KEY}.json"
-
-            # Determine output filename
-            if [ -n "$CUSTOM" ] && [ "$TRACK_COUNT" -eq 1 ]; then
-              OUTFILE="$OUTPUT/${CUSTOM}.%(ext)s"
-            else
-              SAFE_TITLE=$(echo "$TITLE" | tr -d '/<>:"\|?*' | cut -c1-100)
-              SAFE_ARTIST=$(echo "$ARTIST" | tr -d '/<>:"\|?*' | cut -c1-60)
-              OUTFILE="$OUTPUT/${SAFE_ARTIST} - ${SAFE_TITLE} [%(id)s].%(ext)s"
-            fi
-
-            echo "──────────────────────────────"
-            echo "[$INDEX/$TRACK_COUNT] $ARTIST – $TITLE"
-            echo "  YouTube: $YT_URL"
 
             yt-dlp \
               --ffmpeg-location /usr/local/bin \
@@ -352,31 +335,11 @@ jobs:
               --write-thumbnail \
               --convert-thumbnails jpg \
               --newline \
+              --no-playlist \
               $COOKIE_ARG \
               -o "$OUTFILE" \
               --print after_move:filepath \
-              "$YT_URL" 2>&1 | tee "/tmp/yt_out_${KEY}.log"
-
-            # Capture actual output filepath from yt-dlp's --print
-            ACTUAL_FILE=$(grep -oE '^/.+\.(mp3|flac|m4a|opus)$' \
-              "/tmp/yt_out_${KEY}.log" | tail -1)
-
-            if [ -n "$ACTUAL_FILE" ]; then
-              echo "$ACTUAL_FILE" > "/tmp/track_meta/${KEY}.filepath"
-              echo "  ✅ Saved to: $ACTUAL_FILE"
-            else
-              # Fallback: find newest audio file
-              FOUND=$(find "$OUTPUT" -type f \
-                \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) \
-                -newer "/tmp/track_meta/${KEY}.json" | sort | tail -1)
-              if [ -n "$FOUND" ]; then
-                echo "$FOUND" > "/tmp/track_meta/${KEY}.filepath"
-                echo "  ✅ (fallback) Saved to: $FOUND"
-              else
-                echo "  ::warning::Could not locate output file for track $INDEX"
-              fi
-            fi
-
+              "$SEARCH_QUERY" 2>&1 | tee "/tmp/yt_out_${KEY}.log"
           done
 
       # ──────────────────────────────────────────────
