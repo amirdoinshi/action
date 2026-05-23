@@ -1,10 +1,16 @@
-name: Spotify Downloader (Hybrid)
+name: Spotify Downloader
 
-# Strategy:
-#   1. Start bgutil PO Token server on runner host (same as youtube_adv_download.yml)
-#   2. Start Downtify container briefly to resolve Spotify → YouTube URLs + metadata
-#   3. Stop Downtify — all downloading uses native yt-dlp on the runner host
-#   4. mutagen injects Spotify metadata (artist, album, cover art, track #, etc.)
+# Uses spotdl — the correct tool for Spotify downloads:
+#   - Spotify API → full metadata (album, track#, cover art, ISRC, etc.)
+#   - Finds the best YouTube Music match automatically
+#   - Downloads via yt-dlp with our bgutil PO Token setup
+#   - Injects all Spotify tags — no separate mutagen step needed
+#
+# Required secrets (free from https://developer.spotify.com/dashboard):
+#   SPOTIFY_CLIENT_ID
+#   SPOTIFY_CLIENT_SECRET
+# Optional secret:
+#   YT_COOKIES  (Netscape format, helps bypass bot detection)
 
 on:
   workflow_dispatch:
@@ -22,7 +28,7 @@ on:
         default: 'mp3'
 
       audio_quality:
-        description: 'Bitrate (kbps) — MP3/Opus only'
+        description: 'Bitrate (kbps)'
         required: false
         type: choice
         options: ['320', '256', '192', '128']
@@ -33,12 +39,6 @@ on:
         required: false
         type: string
         default: 'downloads'
-
-      custom_filename:
-        description: 'Custom filename override (single track only, no extension)'
-        required: false
-        type: string
-        default: ''
 
       upload_method:
         description: 'Upload method'
@@ -77,14 +77,11 @@ permissions:
   contents: write
 
 jobs:
-  spotify-hybrid-download:
+  spotify-download:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      # ──────────────────────────────────────────────
-      # CHECKOUT
-      # ──────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
@@ -100,9 +97,6 @@ jobs:
       - name: Create output directory
         run: mkdir -p "${{ github.event.inputs.output_folder }}"
 
-      # ──────────────────────────────────────────────
-      # CACHES
-      # ──────────────────────────────────────────────
       - name: Cache npm (bgutil)
         uses: actions/cache@v4
         with:
@@ -118,21 +112,7 @@ jobs:
             /usr/local/bin/ffprobe
           key: ffmpeg-static-7.1
 
-      - name: Cache Downtify Docker image
-        id: cache-docker
-        uses: actions/cache@v4
-        with:
-          path: /tmp/downtify-img.tar
-          key: ${{ runner.os }}-downtify-latest
-
-      - name: Load Downtify image from cache
-        if: steps.cache-docker.outputs.cache-hit == 'true'
-        run: docker load --input /tmp/downtify-img.tar
-
-      # ──────────────────────────────────────────────
-      # INSTALL TOOLS
-      # ──────────────────────────────────────────────
-      - name: Install ffmpeg (static build, fastest)
+      - name: Install ffmpeg (static build)
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
           curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
@@ -150,7 +130,7 @@ jobs:
 
       - name: Install tools
         run: |
-          pip install -q -U "yt-dlp[default]" mutagen
+          pip install -q -U "yt-dlp[default]" spotdl
           rm -rf /tmp/bgutil
           git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
           cd /tmp/bgutil/server && npm ci && npx tsc
@@ -160,380 +140,72 @@ jobs:
           node /tmp/bgutil/server/build/main.js &
           sleep 5
 
-
-      # ──────────────────────────────────────────────
-      # RESOLVE: Spotify → YouTube URLs + metadata
-      # Downtify is ONLY used for this step.
-      # ──────────────────────────────────────────────
-      - name: Start Downtify (resolver only)
-        run: |
-          # --network host so Downtify can reach bgutil on localhost:4416
-          # We only need the API — no cookie/download config needed
-          docker run -d \
-            --name downtify-resolver \
-            --network host \
-            ghcr.io/henriquesebastiao/downtify:latest
-
-          echo "Waiting for Downtify API..."
-          for i in {1..30}; do
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-              --connect-timeout 3 --max-time 5 http://localhost:8000 2>/dev/null || echo "000")
-            if [[ "$HTTP" =~ ^[23] ]]; then
-              echo "✅ Downtify ready (HTTP $HTTP)"
-              break
-            fi
-            echo "  attempt $i/30 – HTTP $HTTP – retrying..."
-            sleep 2
-          done
-
-      - name: Resolve Spotify → YouTube metadata
-        run: |
-          URL="${{ github.event.inputs.spotify_url }}"
-          ENCODED=$(printf '%s' "$URL" | jq -sRr @uri)
-          echo "Resolving: $URL"
-
-          curl -s --connect-timeout 15 --max-time 60 \
-            "http://localhost:8000/api/song/url?url=${ENCODED}" \
-            > /tmp/tracks_raw.json
-
-          echo "=== Raw API response (first 500 chars) ==="
-          head -c 500 /tmp/tracks_raw.json
-          echo ""
-
-          # Normalise to array regardless of single/album/playlist response
-          jq 'if type == "array" then . else [.] end' /tmp/tracks_raw.json \
-            > /tmp/tracks.json
-
-          TRACK_COUNT=$(jq 'length' /tmp/tracks.json)
-          echo "✅ Resolved $TRACK_COUNT track(s)"
-
-      - name: Stop & remove Downtify resolver
-        run: docker stop downtify-resolver && docker rm downtify-resolver
-
-      - name: Save Downtify image to cache
-        if: steps.cache-docker.outputs.cache-hit != 'true'
-        run: docker save ghcr.io/henriquesebastiao/downtify:latest -o /tmp/downtify-img.tar
-
-      # ──────────────────────────────────────────────
-      # COOKIES
-      # ──────────────────────────────────────────────
       - name: Prepare cookies
         run: |
           if [ -n "$INPUT_COOKIES" ]; then
             printf '%s' "$INPUT_COOKIES" > /tmp/cookies.txt
-            echo "COOKIE_ARG=--cookies /tmp/cookies.txt" >> $GITHUB_ENV
+            echo "HAVE_COOKIES=true" >> $GITHUB_ENV
             echo "✅ Using inline cookies ($(wc -l < /tmp/cookies.txt) lines)"
           elif [ -n "$SECRET_YT_COOKIES" ]; then
             printf '%s' "$SECRET_YT_COOKIES" > /tmp/cookies.txt
-            echo "COOKIE_ARG=--cookies /tmp/cookies.txt" >> $GITHUB_ENV
+            echo "HAVE_COOKIES=true" >> $GITHUB_ENV
             echo "✅ Using YT_COOKIES secret ($(wc -l < /tmp/cookies.txt) lines)"
           else
-            echo "COOKIE_ARG=" >> $GITHUB_ENV
+            echo "HAVE_COOKIES=false" >> $GITHUB_ENV
             echo "::warning::No cookies provided — bot-detection may block downloads"
           fi
         env:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      # ──────────────────────────────────────────────
-      # DOWNLOAD: native yt-dlp on host (proven stack)
-      # ──────────────────────────────────────────────
-      - name: Download tracks with native yt-dlp
+      - name: Download with spotdl
         run: |
           export YTDLP_PO_TOKEN_URL="http://localhost:4416"
-          FORMAT="${{ github.event.inputs.output_format }}"
-          QUALITY="${{ github.event.inputs.audio_quality }}"
-          OUTPUT="${{ github.event.inputs.output_folder }}"
-          CUSTOM="${{ github.event.inputs.custom_filename }}"
+          export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
+          export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
           # Verify PO Token server
           curl -s http://localhost:4416/ping \
-            && echo "✅ PO Token server reachable" \
+            && echo "✅ PO Token server ready" \
             || echo "::warning::PO Token server not responding"
 
-          TRACK_COUNT=$(jq 'length' /tmp/tracks.json)
-          echo "Downloading $TRACK_COUNT track(s)..."
+          # Build yt-dlp passthrough args
+          YTDLP_ARGS="--extractor-args 'youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv' --js-runtimes node"
+          if [ "$HAVE_COOKIES" = "true" ]; then
+            YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
+          fi
 
-          # Store per-track metadata next to each downloaded file for mutagen step
-          mkdir -p /tmp/track_meta
+          spotdl download \
+            "${{ github.event.inputs.spotify_url }}" \
+            --client-id "${{ secrets.SPOTIFY_CLIENT_ID }}" \
+            --client-secret "${{ secrets.SPOTIFY_CLIENT_SECRET }}" \
+            --format "${{ github.event.inputs.output_format }}" \
+            --bitrate "${{ github.event.inputs.audio_quality }}k" \
+            --ffmpeg /usr/local/bin/ffmpeg \
+            --output "${{ github.event.inputs.output_folder }}/{artists} - {title}.{output-ext}" \
+            --yt-dlp-args "$YTDLP_ARGS"
 
-          INDEX=0
-          jq -c '.[]' /tmp/tracks.json | while IFS= read -r TRACK; do
-            INDEX=$((INDEX + 1))
+          COUNT=$(find "${{ github.event.inputs.output_folder }}" -type f \
+            \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | wc -l)
+          echo "✅ Downloaded $COUNT file(s)"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No audio files found after download"
+            exit 1
+          fi
 
-            # Extract Spotify metadata
-            # NOTE: Downtify artists field is a plain string array ["AaRON"], not objects
-            TITLE=$(echo "$TRACK" | jq -r '.name // .title // "Unknown Title"')
-            ARTIST=$(echo "$TRACK" | jq -r '
-              if (.artists | type) == "array" then
-                (.artists | map(if type == "object" then .name else . end) | join(", "))
-              elif .artist then .artist
-              else "Unknown Artist"
-              end
-            ')
-            ALBUM=$(echo "$TRACK" | jq -r '.album_name // .album.name // .album // ""')
-            ALBUM_ARTIST=$(echo "$TRACK" | jq -r '
-              .album.artists[0].name //
-              .album_artist //
-              (if (.artists | type) == "array" then
-                (.artists[0] | if type == "object" then .name else . end)
-               else .artist end) //
-              "Unknown"
-            ')
-            TRACK_NUM=$(echo "$TRACK" | jq -r '.track_number // 0')
-            TOTAL_TRACKS=$(echo "$TRACK" | jq -r '.album.total_tracks // 0')
-            COVER_URL=$(echo "$TRACK" | jq -r '.cover_url // .album.images[0].url // .thumbnail // ""')
-            SPOTIFY_ID=$(echo "$TRACK" | jq -r '.song_id // .id // ""')
-            YEAR=$(echo "$TRACK" | jq -r '.year // .release_date // ""' | grep -oE '^[0-9]{4}' | head -1)
-
-            KEY="${SPOTIFY_ID:-track_${INDEX}}"
-
-            echo "──────────────────────────────"
-            echo "[$INDEX/$TRACK_COUNT] $ARTIST – $TITLE  (year: ${YEAR:-?})"
-
-            # Downtify /api/song/url returns Spotify metadata only — no YouTube URL.
-            # Search YouTube Music directly using yt-dlp's ytmsearch extractor.
-            SEARCH_QUERY="ytmsearch1:${ARTIST} ${TITLE}"
-            echo "  Searching YT Music: $SEARCH_QUERY"
-
-            # Determine output filename
-            if [ -n "$CUSTOM" ] && [ "$TRACK_COUNT" -eq 1 ]; then
-              OUTFILE="$OUTPUT/${CUSTOM}.%(ext)s"
-            else
-              SAFE_TITLE=$(echo "$TITLE" | tr -d '/<>:"\|?*' | cut -c1-100)
-              SAFE_ARTIST=$(echo "$ARTIST" | tr -d '/<>:"\|?*' | cut -c1-60)
-              OUTFILE="$OUTPUT/${SAFE_ARTIST} - ${SAFE_TITLE} [%(id)s].%(ext)s"
-            fi
-
-            # Save metadata JSON for the mutagen step
-            jq -n \
-              --arg title "$TITLE" \
-              --arg artist "$ARTIST" \
-              --arg album "$ALBUM" \
-              --arg album_artist "$ALBUM_ARTIST" \
-              --arg track_num "$TRACK_NUM" \
-              --arg total_tracks "$TOTAL_TRACKS" \
-              --arg cover_url "$COVER_URL" \
-              --arg year "$YEAR" \
-              --arg key "$KEY" \
-              '{
-                title: $title, artist: $artist, album: $album,
-                album_artist: $album_artist, track_num: $track_num,
-                total_tracks: $total_tracks, cover_url: $cover_url,
-                year: $year, key: $key
-              }' > "/tmp/track_meta/${KEY}.json"
-
-            yt-dlp \
-              --ffmpeg-location /usr/local/bin \
-              --js-runtimes node \
-              --extractor-args "youtube:player_client=web_music,web,tv,android,ios;po_token=web+tv" \
-              -x \
-              --audio-format "$FORMAT" \
-              --audio-quality "${QUALITY}K" \
-              --embed-thumbnail \
-              --embed-metadata \
-              --write-thumbnail \
-              --convert-thumbnails jpg \
-              --newline \
-              --no-playlist \
-              $COOKIE_ARG \
-              -o "$OUTFILE" \
-              --print after_move:filepath \
-              "$SEARCH_QUERY" 2>&1 | tee "/tmp/yt_out_${KEY}.log"
-          done
-
-      # ──────────────────────────────────────────────
-      # METADATA: inject Spotify tags via mutagen
-      # ──────────────────────────────────────────────
-      - name: Inject Spotify metadata with mutagen
-        run: |
-          python3 << 'PYEOF'
-          import os, json, sys, glob, urllib.request, urllib.error, tempfile, traceback
-
-          meta_dir = "/tmp/track_meta"
-          meta_files = glob.glob(f"{meta_dir}/*.json")
-
-          if not meta_files:
-              print("No metadata files found — skipping mutagen step")
-              sys.exit(0)
-
-          print(f"Injecting metadata for {len(meta_files)} track(s)...")
-
-          for meta_path in sorted(meta_files):
-              key = os.path.splitext(os.path.basename(meta_path))[0]
-              filepath_file = meta_path.replace(".json", ".filepath")
-
-              if not os.path.exists(filepath_file):
-                  print(f"  ⚠ No filepath recorded for {key} — skipping")
-                  continue
-
-              with open(filepath_file) as f:
-                  audio_path = f.read().strip()
-
-              if not os.path.exists(audio_path):
-                  print(f"  ⚠ File not found: {audio_path} — skipping")
-                  continue
-
-              with open(meta_path) as f:
-                  m = json.load(f)
-
-              title        = m.get("title", "")
-              artist       = m.get("artist", "")
-              album        = m.get("album", "")
-              album_artist = m.get("album_artist", "")
-              track_num    = m.get("track_num", "0")
-              total_tracks = m.get("total_tracks", "0")
-              cover_url    = m.get("cover_url", "")
-              year         = m.get("year", "")
-              ext          = os.path.splitext(audio_path)[1].lower()
-
-              print(f"  → {os.path.basename(audio_path)}")
-              print(f"     {artist} / {album} / {title}")
-
-              # Download cover art
-              cover_data = None
-              if cover_url:
-                  try:
-                      req = urllib.request.Request(
-                          cover_url,
-                          headers={"User-Agent": "Mozilla/5.0"}
-                      )
-                      with urllib.request.urlopen(req, timeout=15) as r:
-                          cover_data = r.read()
-                      print(f"     cover: {len(cover_data)//1024} KB from {cover_url[:60]}...")
-                  except Exception as e:
-                      print(f"     ⚠ Cover download failed: {e}")
-
-              try:
-                  if ext == ".mp3":
-                      from mutagen.id3 import (
-                          ID3, TIT2, TPE1, TALB, TPE2, TRCK, TDRC, APIC,
-                          ID3NoHeaderError
-                      )
-                      try:
-                          tags = ID3(audio_path)
-                      except ID3NoHeaderError:
-                          tags = ID3()
-
-                      tags.setall("TIT2", [TIT2(encoding=3, text=title)])
-                      tags.setall("TPE1", [TPE1(encoding=3, text=artist)])
-                      tags.setall("TALB", [TALB(encoding=3, text=album)])
-                      tags.setall("TPE2", [TPE2(encoding=3, text=album_artist)])
-                      if year:
-                          tags.setall("TDRC", [TDRC(encoding=3, text=year)])
-                      trck = track_num if not total_tracks or total_tracks == "0" \
-                            else f"{track_num}/{total_tracks}"
-                      tags.setall("TRCK", [TRCK(encoding=3, text=trck)])
-                      if cover_data:
-                          tags.setall("APIC", [APIC(
-                              encoding=3,
-                              mime="image/jpeg",
-                              type=3,  # front cover
-                              desc="Cover",
-                              data=cover_data,
-                          )])
-                      tags.save(audio_path, v2_version=3)
-
-                  elif ext == ".flac":
-                      from mutagen.flac import FLAC, Picture
-                      tags = FLAC(audio_path)
-                      tags["title"]        = [title]
-                      tags["artist"]       = [artist]
-                      tags["album"]        = [album]
-                      tags["albumartist"]  = [album_artist]
-                      tags["tracknumber"]  = [str(track_num)]
-                      if total_tracks and total_tracks != "0":
-                          tags["totaltracks"] = [str(total_tracks)]
-                      if year:
-                          tags["date"] = [year]
-                      if cover_data:
-                          pic = Picture()
-                          pic.type = 3
-                          pic.mime = "image/jpeg"
-                          pic.desc = "Cover"
-                          pic.data = cover_data
-                          tags.clear_pictures()
-                          tags.add_picture(pic)
-                      tags.save()
-
-                  elif ext in (".m4a", ".aac", ".mp4"):
-                      from mutagen.mp4 import MP4, MP4Cover
-                      tags = MP4(audio_path)
-                      tags["\xa9nam"] = [title]
-                      tags["\xa9ART"] = [artist]
-                      tags["\xa9alb"] = [album]
-                      tags["aART"]    = [album_artist]
-                      if year:
-                          tags["\xa9day"] = [year]
-                      try:
-                          tn = int(track_num) if track_num else 0
-                          tt = int(total_tracks) if total_tracks else 0
-                          tags["trkn"] = [(tn, tt)]
-                      except (ValueError, TypeError):
-                          pass
-                      if cover_data:
-                          tags["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
-                      tags.save()
-
-                  elif ext in (".opus", ".ogg"):
-                      from mutagen.oggopus import OggOpus
-                      from mutagen.flac import Picture
-                      import base64
-                      tags = OggOpus(audio_path)
-                      tags["title"]       = [title]
-                      tags["artist"]      = [artist]
-                      tags["album"]       = [album]
-                      tags["albumartist"] = [album_artist]
-                      tags["tracknumber"] = [str(track_num)]
-                      if year:
-                          tags["date"] = [year]
-                      if cover_data:
-                          pic = Picture()
-                          pic.type = 3
-                          pic.mime = "image/jpeg"
-                          pic.desc = "Cover"
-                          pic.data = cover_data
-                          tags["metadata_block_picture"] = [
-                              base64.b64encode(pic.write()).decode("ascii")
-                          ]
-                      tags.save()
-
-                  else:
-                      print(f"     ⚠ Unsupported extension {ext} — skipping mutagen")
-                      continue
-
-                  print(f"     ✅ Metadata injected")
-
-              except Exception:
-                  print(f"     ❌ mutagen failed for {audio_path}:")
-                  traceback.print_exc()
-
-          print("Metadata injection complete.")
-          PYEOF
-
-      # ──────────────────────────────────────────────
-      # DEBUG (always runs)
-      # ──────────────────────────────────────────────
       - name: Debug summary
         if: always()
         run: |
           echo "=== bgutil status ==="
           curl -s --max-time 3 http://localhost:4416/ping && echo "bgutil up" || echo "bgutil down"
-
           echo "=== Downloaded files ==="
           find "${{ github.event.inputs.output_folder }}" -type f | sort | while read f; do
             echo "  $(du -sh "$f" | cut -f1)  $f"
           done
-
-          echo "=== yt-dlp version ==="
+          echo "=== Tool versions ==="
           yt-dlp --version
+          spotdl --version
 
-          echo "=== Track metadata files ==="
-          ls /tmp/track_meta/ 2>/dev/null || echo "(none)"
-
-      # ──────────────────────────────────────────────
-      # SPLIT LARGE FILES
-      # ──────────────────────────────────────────────
       - name: Split large files (repository / temp_branch)
         if: >
           (github.event.inputs.upload_method == 'repository' ||
@@ -566,9 +238,6 @@ jobs:
             fi
           done
 
-      # ──────────────────────────────────────────────
-      # UPLOAD
-      # ──────────────────────────────────────────────
       - name: Get timestamp
         id: date
         run: echo "date=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
