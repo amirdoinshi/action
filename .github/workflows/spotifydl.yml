@@ -147,13 +147,18 @@ jobs:
             COOKIE_MOUNT=""
           fi
 
+          # --network host: container shares the host's network stack, so
+          # localhost:4416 inside the container IS the bgutil server on the host.
+          # 172.17.0.1 (bridge IP) does NOT work because bgutil binds to 127.0.0.1
+          # only. With host networking there is no bridge — loopback is shared.
+          # Note: -p is not needed with host networking (port 8000 is already on host).
           docker run -d \
             --name downtify \
-            -p 8000:8000 \
+            --network host \
             -v "$(pwd)/${{ github.event.inputs.output_folder }}:/downloads" \
             $COOKIE_MOUNT \
             -e "YTDL_OPTIONS=$YTDL_OPTS" \
-            -e "YTDLP_PO_TOKEN_URL=http://172.17.0.1:4416" \
+            -e "YTDLP_PO_TOKEN_URL=http://localhost:4416" \
             ghcr.io/henriquesebastiao/downtify:latest
 
           # ── Wait for the web server to become ready ──
@@ -346,8 +351,16 @@ jobs:
       - name: Debug cookies & yt-dlp
         if: always()
         run: |
+          echo "=== bgutil reachable from HOST ==="
+          curl -s --max-time 3 http://localhost:4416/ping && echo "bgutil up on host" || echo "bgutil not responding on host"
+          echo "=== bgutil reachable from INSIDE container ==="
+          docker exec downtify sh -c 'curl -s --max-time 3 http://localhost:4416/ping' \
+            && echo "bgutil reachable from container" \
+            || echo "bgutil NOT reachable from container"
+          echo "=== YTDLP_PO_TOKEN_URL inside container ==="
+          docker exec downtify sh -c 'echo $YTDLP_PO_TOKEN_URL'
           echo "=== Cookie mount check ==="
-          docker exec downtify ls -la /cookies/ 2>/dev/null || echo "No /cookies mount (no cookies were provided)"
+          docker exec downtify ls -la /cookies/ 2>/dev/null || echo "No /cookies mount"
           echo "=== YTDL_OPTIONS inside container ==="
           docker exec downtify sh -c 'echo $YTDL_OPTIONS'
           echo "=== yt-dlp version ==="
