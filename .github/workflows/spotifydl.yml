@@ -210,12 +210,15 @@ jobs:
 
               if playlist_match:
                   pid = playlist_match.group(1)
-                  pl = sp.playlist(pid, fields="name,owner.display_name,tracks.total,description")
+                  # Full playlist object — no `fields` filter (it can return a
+                  # partial response where `tracks` is missing, which triggers
+                  # downstream KeyErrors in spotipy).
+                  pl = sp.playlist(pid)
+                  owner = pl.get("owner") or {}
                   info = {
                       "type": "playlist",
-                      "name": pl["name"],
-                      "owner": pl.get("owner", {}).get("display_name", ""),
-                      "total_tracks": pl["tracks"]["total"],
+                      "name": pl.get("name", "Unknown Playlist"),
+                      "owner": owner.get("display_name", ""),
                       "description": pl.get("description", "") or "",
                       "url": url,
                   }
