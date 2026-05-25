@@ -127,7 +127,7 @@ jobs:
 
       - name: Install tools
         run: |
-          pip install -q -U "yt-dlp[default]" spotdl mutagen
+          pip install -q -U "yt-dlp[default]" spotdl mutagen spotipy
           rm -rf /tmp/bgutil
           git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
           cd /tmp/bgutil/server && npm ci && npx tsc
@@ -177,9 +177,59 @@ jobs:
             --format "${{ github.event.inputs.output_format }}" \
             --bitrate "${{ github.event.inputs.audio_quality }}k" \
             --ffmpeg /usr/local/bin/ffmpeg \
-            --output "${{ github.event.inputs.output_folder }}/{list-position:02d} - {artists} - {title}.{output-ext}" \
-            --playlist-numbering \
+            --output "${{ github.event.inputs.output_folder }}/{list-position} - {artists} - {title}.{output-ext}" \
             --yt-dlp-args "$YTDLP_ARGS"
+
+      - name: Fetch collection metadata from Spotify API
+        if: contains(github.event.inputs.spotify_url, '/playlist/') || contains(github.event.inputs.spotify_url, '/album/')
+        env:
+          SPOTIFY_URL: ${{ github.event.inputs.spotify_url }}
+          OUTPUT_FOLDER: ${{ github.event.inputs.output_folder }}
+          SPOTIPY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIPY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+        run: |
+          python3 << 'EOF'
+          import os, re, json
+          import spotipy
+          from spotipy.oauth2 import SpotifyClientCredentials
+
+          url = os.environ["SPOTIFY_URL"]
+          folder = os.environ["OUTPUT_FOLDER"]
+          sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+              client_id=os.environ["SPOTIPY_CLIENT_ID"],
+              client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
+          ))
+
+          info = None
+          if "/playlist/" in url:
+              pid = re.search(r"/playlist/([A-Za-z0-9]+)", url).group(1)
+              pl = sp.playlist(pid, fields="name,owner.display_name,tracks.total,description")
+              info = {
+                  "type": "playlist",
+                  "name": pl["name"],
+                  "owner": pl.get("owner", {}).get("display_name", ""),
+                  "total_tracks": pl["tracks"]["total"],
+                  "description": pl.get("description", "") or "",
+              }
+          elif "/album/" in url:
+              aid = re.search(r"/album/([A-Za-z0-9]+)", url).group(1)
+              al = sp.album(aid)
+              info = {
+                  "type": "album",
+                  "name": al["name"],
+                  "artist": ", ".join(a["name"] for a in al.get("artists", [])),
+                  "total_tracks": al.get("total_tracks", 0),
+                  "year": (al.get("release_date") or "")[:4],
+              }
+
+          if info:
+              out_path = os.path.join(folder, "_collection.info.json")
+              with open(out_path, "w") as f:
+                  json.dump(info, f, indent=2)
+              print(f"✅ Collection metadata written: {info}")
+          else:
+              print("ℹ️  No collection metadata (single track URL).")
+          EOF
 
       - name: Extract metadata using mutagen (robust for all formats)
         run: |
