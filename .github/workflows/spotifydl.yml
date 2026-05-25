@@ -348,7 +348,7 @@ jobs:
         run: |
           cd "${{ github.event.inputs.output_folder }}"
           rm -f cover.jpg cover.png
-          AUDIO_FILE=$(find . -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | head -1)
+          AUDIO_FILE=$(find . -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | sort -V | head -1)
           if [ -n "$AUDIO_FILE" ]; then
             /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec copy cover.jpg -y 2>/dev/null || \
             /usr/local/bin/ffmpeg -i "$AUDIO_FILE" -an -vcodec png cover.png -y 2>/dev/null || true
