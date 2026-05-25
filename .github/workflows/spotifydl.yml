@@ -177,7 +177,8 @@ jobs:
             --format "${{ github.event.inputs.output_format }}" \
             --bitrate "${{ github.event.inputs.audio_quality }}k" \
             --ffmpeg /usr/local/bin/ffmpeg \
-            --output "${{ github.event.inputs.output_folder }}/{artists} - {title}.{output-ext}" \
+            --output "${{ github.event.inputs.output_folder }}/{list-position:02d} - {artists} - {title}.{output-ext}" \
+            --playlist-numbering \
             --yt-dlp-args "$YTDLP_ARGS"
 
       - name: Extract metadata using mutagen (robust for all formats)
