@@ -91,10 +91,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
+      - name: Cache ffmpeg static build
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/ffmpeg
+            /usr/local/bin/ffprobe
+          key: ffmpeg-static-7.1
+
+      - name: Install ffmpeg (static build)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+          sudo cp /tmp/ffmpeg-*-static/ffmpeg /usr/local/bin/
+          sudo cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
+          ffprobe -version | head -1
+
       - name: Cache & install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: ffmpeg curl jq zip python3 python3-pip
+          packages: curl jq zip python3 python3-pip
           version: '1.0'
 
       - name: Install pip packages
@@ -117,6 +135,7 @@ jobs:
           echo "SoundCloud detected"
 
           yt-dlp \
+            --ffmpeg-location /usr/local/bin \
             -x \
             --audio-format "$FORMAT" \
             --audio-quality "$QUALITY" \
