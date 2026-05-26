@@ -180,6 +180,16 @@ jobs:
             --output "${{ github.event.inputs.output_folder }}/{list-position} - {artists} - {title}.{output-ext}" \
             --yt-dlp-args "$YTDLP_ARGS"
 
+      - name: Fail if no audio files were downloaded
+        run: |
+          cd "${{ github.event.inputs.output_folder }}"
+          count=$(find . -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No audio files downloaded. Track may not be available on YouTube or is region-restricted."
+            exit 1
+          fi
+          echo "✅ Downloaded $count audio file(s)."
+
       - name: Fetch collection metadata from Spotify API
         if: contains(github.event.inputs.spotify_url, 'spotify.com') && (contains(github.event.inputs.spotify_url, '/playlist/') || contains(github.event.inputs.spotify_url, '/album/'))
         env:
