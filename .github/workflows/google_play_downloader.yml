@@ -87,10 +87,31 @@ jobs:
           cd gplay-apk-downloader
           ./setup.sh
 
+      # Reuse the same anonymous device token across runs. Fresh `gplay auth`
+      # from a datacenter IP is what trips Google's 429 — caching the token
+      # means we only register a new device on cold cache.
+      - name: Restore cached gplay auth tokens
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gplay-auth.json
+            ~/.gplay-auth-armv7.json
+          key: gplay-auth-v1
+
       - name: Authenticate with Google Play
         run: |
           cd gplay-apk-downloader
-          echo "y" | ./gplay auth
+          AUTH_FILE="$HOME/.gplay-auth.json"
+          if [ "${{ inputs.architecture }}" = "armv7" ]; then
+            AUTH_FILE="$HOME/.gplay-auth-armv7.json"
+          fi
+
+          if [ -f "$AUTH_FILE" ]; then
+            echo "Using cached auth token from $AUTH_FILE"
+          else
+            echo "No cached token, authenticating..."
+            echo "y" | ./gplay auth
+          fi
           echo "Authentication completed."
 
       # sai_mode implies no merge — enforce it here so downstream steps are consistent.
@@ -108,7 +129,46 @@ jobs:
 
           CMD="./gplay download ${{ inputs.package_name }} -a ${{ inputs.architecture }} -o $OUTPUT_DIR"
           echo "Running: $CMD"
-          $CMD
+
+          # Retry on 429. gplay prints the error but may still exit 0, so
+          # detect failure by checking whether any APKs landed in OUTPUT_DIR.
+          MAX_ATTEMPTS=5
+          ATTEMPT=1
+          DELAY=15
+          DOWNLOAD_OK=0
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "── Download attempt $ATTEMPT/$MAX_ATTEMPTS ──"
+            $CMD || true
+
+            if find "$OUTPUT_DIR" -name "*.apk" 2>/dev/null | grep -q .; then
+              DOWNLOAD_OK=1
+              break
+            fi
+
+            echo "⚠️ No APKs produced on attempt $ATTEMPT (likely 429)"
+
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              # After two failures, the cached token may itself be throttled —
+              # rotate to a fresh device profile before continuing to retry.
+              if [ $ATTEMPT -eq 2 ]; then
+                echo "Rotating device profile (re-authenticating)..."
+                rm -f "$HOME/.gplay-auth.json" "$HOME/.gplay-auth-armv7.json"
+                echo "y" | ./gplay auth
+              fi
+
+              echo "Sleeping ${DELAY}s before retry..."
+              sleep $DELAY
+              DELAY=$((DELAY * 2))
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          if [ $DOWNLOAD_OK -ne 1 ]; then
+            echo "Error: All $MAX_ATTEMPTS download attempts failed (rate limited?)"
+            exit 1
+          fi
 
           # gplay may create a package-named subfolder inside OUTPUT_DIR;
           # find APKs wherever they landed and hoist them up.
