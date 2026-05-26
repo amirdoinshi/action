@@ -90,7 +90,34 @@ jobs:
       - name: Authenticate with Google Play
         run: |
           cd gplay-apk-downloader
-          echo "y" | ./gplay auth
+
+          # 429s are per-account, not per-IP. Each `gplay auth` registers a
+          # fresh anonymous device, so retrying rotates to a new account
+          # that hasn't been throttled.
+          MAX_ATTEMPTS=15
+          ATTEMPT=1
+          AUTH_OK=0
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "── Auth attempt $ATTEMPT/$MAX_ATTEMPTS ──"
+            OUTPUT=$(echo "y" | ./gplay auth 2>&1)
+            echo "$OUTPUT"
+
+            if echo "$OUTPUT" | grep -qiE "429|too many requests"; then
+              echo "⚠️ Hit 429 — rotating to a new device profile."
+              sleep 3
+              ATTEMPT=$((ATTEMPT + 1))
+              continue
+            fi
+
+            AUTH_OK=1
+            break
+          done
+
+          if [ $AUTH_OK -ne 1 ]; then
+            echo "Error: All $MAX_ATTEMPTS auth attempts hit 429"
+            exit 1
+          fi
           echo "Authentication completed."
 
       # sai_mode implies no merge — enforce it here so downstream steps are consistent.
