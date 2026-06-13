@@ -271,6 +271,56 @@ def fetch_channel(channel_url: str) -> list[dict]:
         return []
 
     soup = BeautifulSoup(resp.text, 'lxml')
+
+    # Extract channel metadata + download avatar image
+    channel_display_name = channel_name
+    el = soup.find("div", class_="tgme_channel_info_header_title")
+    if el:
+        channel_display_name = el.get_text(strip=True) or channel_name
+
+    channel_username = ""
+    el = soup.find("div", class_="tgme_channel_info_header_username")
+    if el:
+        channel_username = el.get_text(strip=True)
+
+    channel_description = ""
+    el = soup.find("div", class_="tgme_channel_info_description")
+    if el:
+        channel_description = el.get_text(strip=True)
+
+    channel_subscribers = ""
+    counters = soup.find("div", class_="tgme_channel_info_counters")
+    if counters:
+        channel_subscribers = counters.get_text(strip=True)
+
+    # Download avatar image (Telegram CDN is blocked in Iran, so we need the bytes in the artifact)
+    channel_avatar_file = ""
+    m = re.search(r'<meta[^>]*og:image[^>]*content="([^"]*)"', resp.text)
+    if m:
+        avatar_url = m.group(1)
+        try:
+            av_resp = requests.get(avatar_url, headers=HEADERS, timeout=15)
+            if av_resp.status_code == 200:
+                ext = avatar_url.rstrip("/").rsplit(".", 1)[-1] if "." in avatar_url else "jpg"
+                channel_avatar_file = f"{channel_name}_avatar.{ext}"
+                av_path = OUTPUT_DIR / channel_avatar_file
+                with open(av_path, "wb") as f:
+                    f.write(av_resp.content)
+                print(f"  Avatar: {len(av_resp.content)} bytes -> {channel_avatar_file}")
+        except Exception as exc:
+            print(f"  Avatar download failed: {exc}")
+
+    # Save channel info file alongside messages
+    channel_info = {
+        "url": channel_url,
+        "name": channel_display_name,
+        "username": channel_username,
+        "description": channel_description,
+        "subscribers": channel_subscribers,
+        "avatar_file": channel_avatar_file,
+    }
+    with open(OUTPUT_DIR / f"{channel_name}_info.json", "w", encoding="utf-8") as f:
+        json.dump(channel_info, f, indent=2, ensure_ascii=False)
     section = soup.find('section', class_='tgme_channel_history')
     if not section:
         print("  WARN: no channel history section found")
