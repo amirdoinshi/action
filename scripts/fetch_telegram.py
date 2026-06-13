@@ -338,6 +338,23 @@ def fetch_channel(channel_url: str) -> list[dict]:
                 if doc and doc.find("div", class_=lambda c: c and "audio" in c.split()):
                     telegram_post_link = doc.get("href") or telegram_post_link
 
+        # --- Document (PDF, APK, etc.) ---
+        document_url: str | None = None
+        document_filename: str | None = None
+        document_description: str | None = None
+        doc_wrap = bubble.find("a", class_="tgme_widget_message_document_wrap")
+        if doc_wrap and not audio_url:
+            href = doc_wrap.get("href")
+            if href:
+                document_url = href
+                telegram_post_link = href
+            title_el = doc_wrap.find("div", class_="tgme_widget_message_document_title")
+            if title_el:
+                document_filename = title_el.get_text(strip=True)
+            desc_el = doc_wrap.find("div", class_="tgme_widget_message_document_description")
+            if desc_el:
+                document_description = desc_el.get_text(strip=True)
+
         # --- Download media ---
         downloaded_media: list[dict] = []
 
@@ -385,6 +402,9 @@ def fetch_channel(channel_url: str) -> list[dict]:
             'video_url':          video_url,
             'video_thumb_url':    video_thumb_url,
             'audio_url':          audio_url,
+            'document_url':       document_url,
+            'document_filename':  document_filename,
+            'document_description': document_description,
             'telegram_post_link': telegram_post_link,
             'downloaded_media':   downloaded_media,
             'fetched_at':         datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
