@@ -332,6 +332,11 @@ def fetch_channel(channel_url: str) -> list[dict]:
             audio_el = bubble.find("audio")
             if audio_el and audio_el.get("src"):
                 audio_url = audio_el["src"]
+            # Also check for document-type audio (no direct download URL)
+            if not audio_url:
+                doc = bubble.find("a", class_="tgme_widget_message_document_wrap")
+                if doc and doc.find("div", class_=lambda c: c and "audio" in c.split()):
+                    telegram_post_link = doc.get("href") or telegram_post_link
 
         # --- Download media ---
         downloaded_media: list[dict] = []
