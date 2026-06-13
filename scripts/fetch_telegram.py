@@ -326,6 +326,13 @@ def fetch_channel(channel_url: str) -> list[dict]:
                 if m:
                     video_thumb_url = m.group(1)
 
+        # --- Audio / Voice ---
+        audio_url: str | None = None
+        if not video_url:
+            audio_el = bubble.find("audio")
+            if audio_el and audio_el.get("src"):
+                audio_url = audio_el["src"]
+
         # --- Download media ---
         downloaded_media: list[dict] = []
 
@@ -354,6 +361,14 @@ def fetch_channel(channel_url: str) -> list[dict]:
                     downloaded_media.append({'type': 'video_thumb', 'filename': fname, 'size': size})
                     print(f"    Video thumbnail (fallback): {size // 1024} KB")
 
+        if audio_url:
+            fname = f"{channel_name}_{msg_id}_audio.ogg"
+            filepath = MEDIA_DIR / fname
+            ok, size = download_media(audio_url, filepath, "audio")
+            if ok:
+                downloaded_media.append({'type': 'audio', 'filename': fname, 'size': size})
+                print(f"    Audio: {size // 1024} KB")
+
         msg_data = {
             'message_id':         msg_id,
             'channel':            channel_name,
@@ -364,6 +379,7 @@ def fetch_channel(channel_url: str) -> list[dict]:
             'photo_count':        len(photo_urls),
             'video_url':          video_url,
             'video_thumb_url':    video_thumb_url,
+            'audio_url':          audio_url,
             'telegram_post_link': telegram_post_link,
             'downloaded_media':   downloaded_media,
             'fetched_at':         datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
