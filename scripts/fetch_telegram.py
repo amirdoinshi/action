@@ -23,10 +23,11 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 # Configuration
 # ============================================================================
 
-CHANNELS     = [u.strip() for u in os.environ.get("INPUT_CHANNELS", "").split(",") if u.strip()]
-RUN_ID       = os.environ.get("INPUT_RUN_ID", "unknown")
-HISTORY_JSON = os.environ.get("INPUT_HISTORY", "{}")
-OUTPUT_DIR   = Path(f"downloads/run_{RUN_ID}")
+CHANNELS         = [u.strip() for u in os.environ.get("INPUT_CHANNELS", "").split(",") if u.strip()]
+RUN_ID           = os.environ.get("INPUT_RUN_ID", "unknown")
+HISTORY_JSON     = os.environ.get("INPUT_HISTORY", "{}")
+OUTPUT_DIR       = Path(f"downloads/run_{RUN_ID}")
+AVATAR_CHANNELS  = set(u.strip().rstrip("/") for u in os.environ.get("INPUT_AVATAR_CHANNELS", "").split(",") if u.strip())
 
 # Tehran timezone — UTC+3:30, no DST (Iran stopped DST permanently in 2022).
 # Must be timedelta, NOT timezone(), so we can add it to a datetime.
@@ -295,20 +296,23 @@ def fetch_channel(channel_url: str) -> list[dict]:
 
     # Download avatar image (Telegram CDN is blocked in Iran, so we need the bytes in the artifact)
     channel_avatar_file = ""
-    m = re.search(r'<meta[^>]*og:image[^>]*content="([^"]*)"', resp.text)
-    if m:
-        avatar_url = m.group(1)
-        try:
-            av_resp = requests.get(avatar_url, headers=HEADERS, timeout=15)
-            if av_resp.status_code == 200:
-                ext = avatar_url.rstrip("/").rsplit(".", 1)[-1] if "." in avatar_url else "jpg"
-                channel_avatar_file = f"{channel_name}_avatar.{ext}"
-                av_path = OUTPUT_DIR / channel_avatar_file
-                with open(av_path, "wb") as f:
-                    f.write(av_resp.content)
-                print(f"  Avatar: {len(av_resp.content)} bytes -> {channel_avatar_file}")
-        except Exception as exc:
-            print(f"  Avatar download failed: {exc}")
+    if AVATAR_CHANNELS and channel_url.rstrip("/") not in AVATAR_CHANNELS:
+        print(f"  Avatar: skipped (not in avatar_channels list)")
+    else:
+        m = re.search(r'<meta[^>]*og:image[^>]*content="([^"]*)"', resp.text)
+        if m:
+            avatar_url = m.group(1)
+            try:
+                av_resp = requests.get(avatar_url, headers=HEADERS, timeout=15)
+                if av_resp.status_code == 200:
+                    ext = avatar_url.rstrip("/").rsplit(".", 1)[-1] if "." in avatar_url else "jpg"
+                    channel_avatar_file = f"{channel_name}_avatar.{ext}"
+                    av_path = OUTPUT_DIR / channel_avatar_file
+                    with open(av_path, "wb") as f:
+                        f.write(av_resp.content)
+                    print(f"  Avatar: {len(av_resp.content)} bytes -> {channel_avatar_file}")
+            except Exception as exc:
+                print(f"  Avatar download failed: {exc}")
 
     # Save channel info file alongside messages
     channel_info = {

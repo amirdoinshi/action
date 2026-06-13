@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: '50'
+      avatar_channels:
+        description: 'Comma-separated channel URLs to download avatars for'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -57,6 +62,7 @@ jobs:
           INPUT_RUN_ID:           ${{ github.event.inputs.run_id }}
           INPUT_HISTORY:          ${{ github.event.inputs.history }}
           INPUT_MAX_MEDIA_SIZE_MB: ${{ github.event.inputs.max_media_size_mb }}
+          INPUT_AVATAR_CHANNELS:  ${{ github.event.inputs.avatar_channels }}
 
       - name: Create temporary results branch
         run: |
