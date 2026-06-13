@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: '{}'
+      max_media_size_mb:
+        description: 'Max media file size in MB'
+        required: false
+        type: string
+        default: '50'
 
 permissions:
   contents: write
@@ -48,9 +53,10 @@ jobs:
       - name: Fetch Telegram messages
         run: python3 scripts/fetch_telegram.py
         env:
-          INPUT_CHANNELS: ${{ github.event.inputs.channels }}
-          INPUT_RUN_ID:   ${{ github.event.inputs.run_id }}
-          INPUT_HISTORY:  ${{ github.event.inputs.history }}
+          INPUT_CHANNELS:         ${{ github.event.inputs.channels }}
+          INPUT_RUN_ID:           ${{ github.event.inputs.run_id }}
+          INPUT_HISTORY:          ${{ github.event.inputs.history }}
+          INPUT_MAX_MEDIA_SIZE_MB: ${{ github.event.inputs.max_media_size_mb }}
 
       - name: Create temporary results branch
         run: |

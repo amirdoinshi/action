@@ -34,7 +34,7 @@ TEHRAN_OFFSET = timedelta(hours=3, minutes=30)
 
 MAX_WORKERS         = 2
 REQUEST_DELAY       = 1.0        # seconds between sequential page fetches per worker
-MAX_FILE_SIZE_MB    = 50
+MAX_FILE_SIZE_MB    = int(os.environ.get("INPUT_MAX_MEDIA_SIZE_MB", "50"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_PHOTOS_PER_MSG  = 5
 
