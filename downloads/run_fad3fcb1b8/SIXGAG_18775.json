@@ -1,0 +1,24 @@
+{
+  "message_id": "18775",
+  "channel": "SIXGAG",
+  "channel_url": "https://t.me/s/SIXGAG",
+  "content": "[#meme](?q=%23meme)  \n[@SIXGAG](https://t.me/SIXGAG)",
+  "timestamp": "16:25",
+  "photo_url": "https://cdn4.telesco.pe/file/QbrqGxNguCquS3hCz1wvnvvosNKR9LW9C5x5hQpSsTlWjgCAIl5eUrEB-cC7hMCUA41mgZI_7mpnDjgWLG3vsEoFltu7zRaZFurAHbMT1hA7QZPZwtb7_YeYOdDmk5p4Ua1jJPYlezKmJn7yVGVuLMNsrWji7ZwAhFSsTPxZq2YxNKIxyn6pOtjKsCgql6jRr7xUpof2nU3hM5EERGGlxFsU89ENRh7o7mQnup0gCbocFgAV5pLjlLXf-Vym9CKVRD9yOs-aBPt_ouQitMchdi1WMGuF4c5upzernpio8Su3v8GvffCs4JEY-nIb0CRxUbVXpECe_SMSQBGJJMy8vQ.jpg",
+  "photo_count": 1,
+  "video_url": null,
+  "video_thumb_url": null,
+  "audio_url": null,
+  "document_url": null,
+  "document_filename": null,
+  "document_description": null,
+  "telegram_post_link": "https://t.me/SIXGAG/18775",
+  "downloaded_media": [
+    {
+      "type": "photo",
+      "filename": "SIXGAG_18775_photo_0.jpg",
+      "size": 62560
+    }
+  ],
+  "fetched_at": "2026-06-30T13:03:50Z"
+}
