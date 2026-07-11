@@ -128,7 +128,7 @@ jobs:
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: zip nodejs npm curl python3-pip wireguard-tools resolvconf
+          packages: zip nodejs npm curl python3-pip wireguard-tools
           version: 1.0
 
       - name: Install tools
@@ -170,11 +170,14 @@ jobs:
 
       - name: Download with spotdl
         run: |
-          # Start Warp tunnel — routes all traffic through Cloudflare IPs
-          sudo wg-quick up /tmp/warp/wgcf-profile.conf
-          trap 'sudo wg-quick down /tmp/warp/wgcf-profile.conf 2>/dev/null' EXIT
-          sleep 2
-          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
+          # Manual WireGuard tunnel (skip wg-quick's DNS/resolvconf)
+          sudo ip link add dev wgcf-profile type wireguard 2>/dev/null || true
+          sudo wg setconf wgcf-profile /tmp/warp/wgcf-profile.conf
+          sudo ip link set up dev wgcf-profile
+          sudo ip route add 0.0.0.0/0 dev wgcf-profile metric 1
+          trap 'sudo ip link del dev wgcf-profile 2>/dev/null; sudo ip route del 0.0.0.0/0 dev wgcf-profile 2>/dev/null' EXIT
+
+          curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
 
           export YTDLP_PO_TOKEN_URL="http://localhost:4416"
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
