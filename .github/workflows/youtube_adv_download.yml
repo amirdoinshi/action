@@ -247,6 +247,22 @@ jobs:
           path: /tmp/warp-reg-cache
           key: warp-reg-v1
 
+      - name: Cache & install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: zip nodejs npm curl
+          version: 1.0
+
+      - name: Install tools
+        run: |
+          pip install -q -U "yt-dlp[default]"
+      - name: Create or checkout temporary branch
+        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
+        run: |
+          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
+          git checkout -b "${{ github.event.inputs.branch_name }}"
+          git push -u origin "${{ github.event.inputs.branch_name }}"
+
       - name: Start Warp proxy
         run: |
           sudo systemctl start warp-svc
@@ -264,22 +280,6 @@ jobs:
           warp-cli --accept-tos connect
           sleep 3
           curl -s --max-time 5 --proxy socks5://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
-
-      - name: Cache & install apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: zip nodejs npm curl
-          version: 1.0
-
-      - name: Install tools
-        run: |
-          pip install -q -U "yt-dlp[default]"
-      - name: Create or checkout temporary branch
-        if: github.event.inputs.upload_method == 'temp_branch' && github.event.inputs.branch_name != ''
-        run: |
-          # Since branch_name is always unique (temp-run-{run_id}), no fetch needed
-          git checkout -b "${{ github.event.inputs.branch_name }}"
-          git push -u origin "${{ github.event.inputs.branch_name }}"
 
       - name: Download media
         run: |
