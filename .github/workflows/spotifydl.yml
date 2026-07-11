@@ -119,15 +119,7 @@ jobs:
           sudo cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
           ffprobe -version | head -1
 
-      - name: Cache Deno
-        id: cache-deno
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/deno
-          key: deno-2.x
-
       - name: Install Deno
-        if: steps.cache-deno.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           sudo cp "$HOME/.deno/bin/deno" /usr/local/bin/deno
@@ -136,7 +128,7 @@ jobs:
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: zip nodejs npm curl python3-pip
+          packages: zip nodejs npm curl python3-pip wireguard-tools resolvconf
           version: 1.0
 
       - name: Install tools
@@ -169,8 +161,32 @@ jobs:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
+      - name: Cache Warp config
+        id: cache-warp
+        uses: actions/cache@v4
+        with:
+          path: /tmp/warp
+          key: warp-config-v1
+
+      - name: Install Warp (WireGuard tunnel)
+        if: steps.cache-warp.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/warp
+          curl -fsSL https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.22_linux_amd64 \
+            -o /tmp/warp/wgcf
+          chmod +x /tmp/warp/wgcf
+          cd /tmp/warp
+          echo | /tmp/warp/wgcf register --accept-tos
+          /tmp/warp/wgcf generate
+
       - name: Download with spotdl
         run: |
+          # Start Warp tunnel — routes all traffic through Cloudflare IPs
+          sudo wg-quick up /tmp/warp/wgcf-profile.conf
+          trap 'sudo wg-quick down /tmp/warp/wgcf-profile.conf 2>/dev/null' EXIT
+          sleep 2
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
+
           export YTDLP_PO_TOKEN_URL="http://localhost:4416"
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
