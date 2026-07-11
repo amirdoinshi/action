@@ -172,8 +172,9 @@ jobs:
         if: steps.cache-warp.outputs.cache-hit != 'true'
         run: |
           mkdir -p /tmp/warp
-          curl -fsSL https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.22_linux_amd64 \
-            -o /tmp/warp/wgcf
+          URL=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest \
+            | grep browser_download_url | cut -d'"' -f4 | grep linux_amd64)
+          curl -fsSL "$URL" -o /tmp/warp/wgcf
           chmod +x /tmp/warp/wgcf
           cd /tmp/warp
           echo | /tmp/warp/wgcf register --accept-tos
