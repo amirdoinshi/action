@@ -128,7 +128,7 @@ jobs:
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: zip nodejs npm curl python3-pip wireguard-tools
+          packages: zip nodejs npm curl python3-pip
           version: 1.0
 
       - name: Install tools
@@ -161,30 +161,8 @@ jobs:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      - name: Write Warp config
-        env:
-          WARP_CONFIG: ${{ secrets.WARP_CONFIG }}
-        run: |
-          mkdir -p /tmp/warp
-          printf '%s' "$WARP_CONFIG" > /tmp/warp/wgcf-profile.conf
-
       - name: Download with spotdl
         run: |
-          # Manual WireGuard tunnel — route only Google/YouTube IPs through Warp
-          grep -v -E '^(Address|DNS|MTU)\s*=' /tmp/warp/wgcf-profile.conf > /tmp/warp/wgcf.conf
-          sudo ip link add dev wgcf-profile type wireguard 2>/dev/null || true
-          sudo wg setconf wgcf-profile /tmp/warp/wgcf.conf
-          sudo ip addr add $(grep '^Address' /tmp/warp/wgcf-profile.conf | head -1 | sed 's/.*= *//' | cut -d, -f1) dev wgcf-profile 2>/dev/null || true
-          sudo ip link set up dev wgcf-profile
-
-          for range in $(curl -fsSL https://www.gstatic.com/ipranges/goog.txt | grep -v ':' | head -200); do
-            sudo ip route add "$range" dev wgcf-profile 2>/dev/null || true
-          done
-
-          trap 'sudo ip link del dev wgcf-profile 2>/dev/null' EXIT
-
-          curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
-
           export YTDLP_PO_TOKEN_URL="http://localhost:4416"
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
