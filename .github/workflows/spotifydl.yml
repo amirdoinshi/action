@@ -147,7 +147,7 @@ jobs:
             echo "✅ Restored cached WARP registration"
           fi
 
-          warp-cli --accept-tos registration new || true
+          warp-cli registration new -- --accept-tos || true
           warp-cli tunnel protocol set MASQUE
           warp-cli mode proxy
           warp-cli proxy port 40000
