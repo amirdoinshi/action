@@ -189,7 +189,7 @@ jobs:
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          YTDLP_ARGS="--extractor-args youtube:player_client=default,-android_vr --js-runtimes deno --fragment-retries infinite --socket-timeout 60 --proxy socks5://127.0.0.1:40000"
+          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv,android,ios --js-runtimes deno"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi
@@ -203,8 +203,6 @@ jobs:
             --ffmpeg /usr/local/bin/ffmpeg \
             --output "${{ github.event.inputs.output_folder }}/{list-position} - {artists} - {title}.{output-ext}" \
             --yt-dlp-args "$YTDLP_ARGS"
-        env:
-          ALL_PROXY: socks5://127.0.0.1:40000
 
       - name: Fail if no audio files were downloaded
         run: |
