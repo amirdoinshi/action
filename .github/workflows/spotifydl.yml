@@ -186,7 +186,6 @@ jobs:
 
           spotdl download \
             "${{ github.event.inputs.spotify_url }}" \
-            --download-deno \
             --client-id "${{ secrets.SPOTIFY_CLIENT_ID }}" \
             --client-secret "${{ secrets.SPOTIFY_CLIENT_SECRET }}" \
             --format "${{ github.event.inputs.output_format }}" \
