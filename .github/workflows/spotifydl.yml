@@ -125,18 +125,6 @@ jobs:
           sudo cp "$HOME/.deno/bin/deno" /usr/local/bin/deno
           deno --version
 
-      - name: Install Warp CLI (Cloudflare)
-        run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt update -qq && sudo apt install -y -qq cloudflare-warp
-
-      - name: Cache Warp registration
-        uses: actions/cache@v4
-        with:
-          path: /tmp/warp-reg-cache
-          key: warp-reg-v1
-
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
