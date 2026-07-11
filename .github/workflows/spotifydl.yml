@@ -125,6 +125,36 @@ jobs:
           sudo cp "$HOME/.deno/bin/deno" /usr/local/bin/deno
           deno --version
 
+      - name: Install Warp CLI (Cloudflare)
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt update -qq && sudo apt install -y -qq cloudflare-warp
+
+      - name: Cache Warp registration
+        uses: actions/cache@v4
+        with:
+          path: /tmp/warp-reg-cache
+          key: warp-reg-v1
+
+      - name: Start Warp proxy
+        run: |
+          sudo systemctl start warp-svc
+          sleep 2
+
+          if [ -d /tmp/warp-reg-cache ] && [ "$(ls -A /tmp/warp-reg-cache 2>/dev/null)" ]; then
+            sudo cp -r /tmp/warp-reg-cache/. /var/lib/cloudflare-warp/
+            echo "✅ Restored cached WARP registration"
+          fi
+
+          warp-cli registration new || true
+          warp-cli tunnel protocol set MASQUE
+          warp-cli mode proxy
+          warp-cli proxy port 40000
+          warp-cli connect
+          sleep 3
+          curl -s --max-time 5 --proxy socks5://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
+
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
@@ -158,7 +188,7 @@ jobs:
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv,android,ios --js-runtimes deno"
+          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv,android,ios --js-runtimes deno --proxy socks5://127.0.0.1:40000"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi
@@ -182,6 +212,16 @@ jobs:
             exit 1
           fi
           echo "✅ Downloaded $count audio file(s)."
+
+      - name: Stop Warp proxy
+        if: always()
+        run: |
+          warp-cli disconnect || true
+          sudo systemctl stop warp-svc || true
+          sudo mkdir -p /tmp/warp-reg-cache
+          sudo cp -r /var/lib/cloudflare-warp/. /tmp/warp-reg-cache/
+          sudo chown -R "$USER:$USER" /tmp/warp-reg-cache 2>/dev/null || true
+          echo "✅ WARP registration cached for next run"
 
       - name: Fetch collection metadata from Spotify API
         if: contains(github.event.inputs.spotify_url, 'spotify.com') && (contains(github.event.inputs.spotify_url, '/playlist/') || contains(github.event.inputs.spotify_url, '/album/'))
@@ -370,8 +410,6 @@ jobs:
       - name: Debug summary
         if: always()
         run: |
-          echo "=== bgutil status ==="
-          curl -s --max-time 3 http://localhost:4416/ping && echo "bgutil up" || echo "bgutil down"
           echo "=== Downloaded files ==="
           find "${{ github.event.inputs.output_folder }}" -type f | sort | while read f; do
             echo "  $(du -sh "$f" | cut -f1)  $f"
