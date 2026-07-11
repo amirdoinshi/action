@@ -149,7 +149,7 @@ jobs:
 
       - name: Download with spotdl
         run: |
-          YTDLP_ARGS="--extractor-args youtube:player_client=default,-android_vr --js-runtimes deno"
+          YTDLP_ARGS='--extractor-args youtube:player_client=default,-android_vr --js-runtimes deno'
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi
