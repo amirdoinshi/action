@@ -125,6 +125,37 @@ jobs:
           sudo cp "$HOME/.deno/bin/deno" /usr/local/bin/deno
           deno --version
 
+      - name: Install Cloudflare WARP
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt update -qq && sudo apt install -y -qq cloudflare-warp
+
+      - name: Cache WARP registration
+        id: cache-warp
+        uses: actions/cache@v4
+        with:
+          path: /tmp/warp-reg-cache
+          key: warp-reg-v1
+
+      - name: Start WARP proxy
+        run: |
+          sudo systemctl start warp-svc
+          sleep 3
+          if [ -d /tmp/warp-reg-cache ] && [ "$(ls -A /tmp/warp-reg-cache 2>/dev/null)" ]; then
+            sudo cp -r /tmp/warp-reg-cache/. /var/lib/cloudflare-warp/
+            echo "✅ Restored cached WARP registration"
+          else
+            warp-cli --accept-tos registration new || true
+          fi
+          warp-cli --accept-tos tunnel protocol set MASQUE
+          warp-cli --accept-tos mode proxy
+          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos connect
+          sleep 3
+          curl -s --max-time 5 --proxy socks5://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
+          echo "✅ WARP proxy ready on socks5://127.0.0.1:40000"
+
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
@@ -158,7 +189,7 @@ jobs:
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          YTDLP_ARGS="--extractor-args youtube:player_client=default,-android_vr --js-runtimes deno --fragment-retries infinite --socket-timeout 60"
+          YTDLP_ARGS="--extractor-args youtube:player_client=default,-android_vr --js-runtimes deno --fragment-retries infinite --socket-timeout 60 --proxy socks5://127.0.0.1:40000"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi
@@ -167,12 +198,13 @@ jobs:
             "${{ github.event.inputs.spotify_url }}" \
             --client-id "${{ secrets.SPOTIFY_CLIENT_ID }}" \
             --client-secret "${{ secrets.SPOTIFY_CLIENT_SECRET }}" \
-            --use-official-api \
             --format "${{ github.event.inputs.output_format }}" \
             --bitrate "${{ github.event.inputs.audio_quality }}k" \
             --ffmpeg /usr/local/bin/ffmpeg \
             --output "${{ github.event.inputs.output_folder }}/{list-position} - {artists} - {title}.{output-ext}" \
             --yt-dlp-args "$YTDLP_ARGS"
+        env:
+          ALL_PROXY: socks5://127.0.0.1:40000
 
       - name: Fail if no audio files were downloaded
         run: |
@@ -367,6 +399,16 @@ jobs:
               mv cover.png "${BASE}_cover.png"
             fi
           fi
+
+      - name: Save WARP registration for next run
+        if: always()
+        run: |
+          warp-cli --accept-tos disconnect || true
+          sudo systemctl stop warp-svc || true
+          sudo mkdir -p /tmp/warp-reg-cache
+          sudo cp -r /var/lib/cloudflare-warp/. /tmp/warp-reg-cache/
+          sudo chown -R "$USER:$USER" /tmp/warp-reg-cache 2>/dev/null || true
+          echo "✅ WARP registration cached for next run"
 
       - name: Debug summary
         if: always()
