@@ -167,6 +167,7 @@ jobs:
             "${{ github.event.inputs.spotify_url }}" \
             --client-id "${{ secrets.SPOTIFY_CLIENT_ID }}" \
             --client-secret "${{ secrets.SPOTIFY_CLIENT_SECRET }}" \
+            --use-official-api \
             --format "${{ github.event.inputs.output_format }}" \
             --bitrate "${{ github.event.inputs.audio_quality }}k" \
             --ffmpeg /usr/local/bin/ffmpeg \
