@@ -165,7 +165,7 @@ jobs:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      - name: Start Warp proxy
+      - name: Start Warp tunnel
         run: |
           sudo systemctl start warp-svc
           sleep 2
@@ -176,19 +176,17 @@ jobs:
           fi
 
           warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos tunnel protocol set MASQUE
-          warp-cli --accept-tos mode proxy
-          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos mode warp+doh
           warp-cli --accept-tos connect
           sleep 3
-          curl -s --max-time 5 --proxy socks5://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
+          curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
 
       - name: Download with spotdl
         run: |
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv --js-runtimes deno --proxy socks5h://127.0.0.1:40000 --fragment-retries infinite --socket-timeout 60"
+          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv --js-runtimes deno --fragment-retries infinite --socket-timeout 60"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi
@@ -213,7 +211,7 @@ jobs:
           fi
           echo "✅ Downloaded $count audio file(s)."
 
-      - name: Stop Warp proxy
+      - name: Stop Warp tunnel
         if: always()
         run: |
           warp-cli --accept-tos disconnect || true

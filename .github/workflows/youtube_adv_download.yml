@@ -263,7 +263,7 @@ jobs:
           git checkout -b "${{ github.event.inputs.branch_name }}"
           git push -u origin "${{ github.event.inputs.branch_name }}"
 
-      - name: Start Warp proxy
+      - name: Start Warp tunnel
         run: |
           sudo systemctl start warp-svc
           sleep 2
@@ -274,12 +274,10 @@ jobs:
           fi
 
           warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos tunnel protocol set MASQUE
-          warp-cli --accept-tos mode proxy
-          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos mode warp+doh
           warp-cli --accept-tos connect
           sleep 3
-          curl -s --max-time 5 --proxy socks5://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
+          curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
 
       - name: Download media
         run: |
@@ -402,7 +400,6 @@ jobs:
           yt-dlp \
             --ffmpeg-location /usr/local/bin \
             --js-runtimes deno \
-            --proxy socks5h://127.0.0.1:40000 \
             --newline \
             --write-thumbnail \
             --write-info-json \
@@ -446,7 +443,7 @@ jobs:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      - name: Stop Warp proxy
+      - name: Stop Warp tunnel
         if: always()
         run: |
           warp-cli --accept-tos disconnect || true
