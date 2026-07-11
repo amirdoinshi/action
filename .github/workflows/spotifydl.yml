@@ -161,24 +161,12 @@ jobs:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      - name: Cache Warp config
-        id: cache-warp
-        uses: actions/cache@v4
-        with:
-          path: /tmp/warp
-          key: warp-config-v1
-
-      - name: Install Warp (WireGuard tunnel)
-        if: steps.cache-warp.outputs.cache-hit != 'true'
+      - name: Write Warp config
+        env:
+          WARP_CONFIG: ${{ secrets.WARP_CONFIG }}
         run: |
           mkdir -p /tmp/warp
-          URL=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-            | grep browser_download_url | cut -d'"' -f4 | grep linux_amd64)
-          curl -fsSL "$URL" -o /tmp/warp/wgcf
-          chmod +x /tmp/warp/wgcf
-          cd /tmp/warp
-          echo | /tmp/warp/wgcf register --accept-tos
-          /tmp/warp/wgcf generate
+          printf '%s' "$WARP_CONFIG" > /tmp/warp/wgcf-profile.conf
 
       - name: Download with spotdl
         run: |
