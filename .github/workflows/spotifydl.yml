@@ -171,8 +171,10 @@ jobs:
       - name: Download with spotdl
         run: |
           # Manual WireGuard tunnel — route only Google/YouTube IPs through Warp
+          grep -v -E '^(Address|DNS|MTU)\s*=' /tmp/warp/wgcf-profile.conf > /tmp/warp/wgcf.conf
           sudo ip link add dev wgcf-profile type wireguard 2>/dev/null || true
-          sudo wg setconf wgcf-profile /tmp/warp/wgcf-profile.conf
+          sudo wg setconf wgcf-profile /tmp/warp/wgcf.conf
+          sudo ip addr add $(grep '^Address' /tmp/warp/wgcf-profile.conf | head -1 | sed 's/.*= *//' | cut -d, -f1) dev wgcf-profile 2>/dev/null || true
           sudo ip link set up dev wgcf-profile
 
           for range in $(curl -fsSL https://www.gstatic.com/ipranges/goog.txt | grep -v ':' | head -200); do
