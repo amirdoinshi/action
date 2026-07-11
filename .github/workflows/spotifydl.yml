@@ -125,6 +125,12 @@ jobs:
           packages: zip nodejs npm curl python3-pip
           version: 1.0
 
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-spotdl-v1
+
       - name: Install tools
         run: |
           pip install -q -U "yt-dlp[default]" spotdl mutagen spotipy
