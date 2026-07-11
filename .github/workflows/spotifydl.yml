@@ -165,28 +165,12 @@ jobs:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
 
-      - name: Start Warp tunnel
-        run: |
-          sudo systemctl start warp-svc
-          sleep 2
-
-          if [ -d /tmp/warp-reg-cache ] && [ "$(ls -A /tmp/warp-reg-cache 2>/dev/null)" ]; then
-            sudo cp -r /tmp/warp-reg-cache/. /var/lib/cloudflare-warp/
-            echo "✅ Restored cached WARP registration"
-          fi
-
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos mode warp+doh
-          warp-cli --accept-tos connect
-          sleep 3
-          curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
-
       - name: Download with spotdl
         run: |
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv --js-runtimes deno --fragment-retries infinite --socket-timeout 60"
+          YTDLP_ARGS="--extractor-args youtube:player_client=default,-android_vr --js-runtimes deno --fragment-retries infinite --socket-timeout 60"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi
@@ -210,16 +194,6 @@ jobs:
             exit 1
           fi
           echo "✅ Downloaded $count audio file(s)."
-
-      - name: Stop Warp tunnel
-        if: always()
-        run: |
-          warp-cli --accept-tos disconnect || true
-          sudo systemctl stop warp-svc || true
-          sudo mkdir -p /tmp/warp-reg-cache
-          sudo cp -r /var/lib/cloudflare-warp/. /tmp/warp-reg-cache/
-          sudo chown -R "$USER:$USER" /tmp/warp-reg-cache 2>/dev/null || true
-          echo "✅ WARP registration cached for next run"
 
       - name: Fetch collection metadata from Spotify API
         if: contains(github.event.inputs.spotify_url, 'spotify.com') && (contains(github.event.inputs.spotify_url, '/playlist/') || contains(github.event.inputs.spotify_url, '/album/'))

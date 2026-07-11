@@ -263,22 +263,6 @@ jobs:
           git checkout -b "${{ github.event.inputs.branch_name }}"
           git push -u origin "${{ github.event.inputs.branch_name }}"
 
-      - name: Start Warp tunnel
-        run: |
-          sudo systemctl start warp-svc
-          sleep 2
-
-          if [ -d /tmp/warp-reg-cache ] && [ "$(ls -A /tmp/warp-reg-cache 2>/dev/null)" ]; then
-            sudo cp -r /tmp/warp-reg-cache/. /var/lib/cloudflare-warp/
-            echo "✅ Restored cached WARP registration"
-          fi
-
-          warp-cli --accept-tos registration new || true
-          warp-cli --accept-tos mode warp+doh
-          warp-cli --accept-tos connect
-          sleep 3
-          curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace | grep -E 'warp|ip'
-
       - name: Download media
         run: |
           URL="${{ github.event.inputs.video_url }}"
@@ -403,10 +387,10 @@ jobs:
             --newline \
             --write-thumbnail \
             --write-info-json \
-            --extractor-args "youtube:player_client=web_music,web,tv" \
+            --extractor-args "youtube:player_client=default,-android_vr" \
             --fragment-retries infinite \
             --socket-timeout 60 \
-            --concurrent-fragments 1 \
+            --concurrent-fragments "${FRAGMENTS}" \
             $FORMAT_ARGS \
             $SECTION_ARGS \
             $SUBTITLE_ARGS \
@@ -442,16 +426,6 @@ jobs:
         env:
           INPUT_COOKIES: ${{ github.event.inputs.cookies }}
           SECRET_YT_COOKIES: ${{ secrets.YT_COOKIES }}
-
-      - name: Stop Warp tunnel
-        if: always()
-        run: |
-          warp-cli --accept-tos disconnect || true
-          sudo systemctl stop warp-svc || true
-          sudo mkdir -p /tmp/warp-reg-cache
-          sudo cp -r /var/lib/cloudflare-warp/. /tmp/warp-reg-cache/
-          sudo chown -R "$USER:$USER" /tmp/warp-reg-cache 2>/dev/null || true
-          echo "✅ WARP registration cached for next run"
 
       - name: Split oversized files (repository/temp_branch mode)
         if: github.event.inputs.upload_method == 'repository' || github.event.inputs.upload_method == 'temp_branch'
