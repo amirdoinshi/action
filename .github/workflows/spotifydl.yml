@@ -188,7 +188,7 @@ jobs:
           export SPOTIPY_CLIENT_ID="${{ secrets.SPOTIFY_CLIENT_ID }}"
           export SPOTIPY_CLIENT_SECRET="${{ secrets.SPOTIFY_CLIENT_SECRET }}"
 
-          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv,android,ios --js-runtimes deno --proxy socks5://127.0.0.1:40000"
+          YTDLP_ARGS="--extractor-args youtube:player_client=web_music,web,tv --js-runtimes deno --proxy socks5h://127.0.0.1:40000 --fragment-retries infinite --socket-timeout 60"
           if [ "$HAVE_COOKIES" = "true" ]; then
             YTDLP_ARGS="$YTDLP_ARGS --cookies /tmp/cookies.txt"
           fi

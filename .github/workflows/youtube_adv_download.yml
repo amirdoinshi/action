@@ -402,12 +402,14 @@ jobs:
           yt-dlp \
             --ffmpeg-location /usr/local/bin \
             --js-runtimes deno \
-            --proxy socks5://127.0.0.1:40000 \
+            --proxy socks5h://127.0.0.1:40000 \
             --newline \
             --write-thumbnail \
             --write-info-json \
-            --extractor-args "youtube:player_client=web_music,web,tv,android,ios" \
-            --concurrent-fragments "${FRAGMENTS}" \
+            --extractor-args "youtube:player_client=web_music,web,tv" \
+            --fragment-retries infinite \
+            --socket-timeout 60 \
+            --concurrent-fragments 1 \
             $FORMAT_ARGS \
             $SECTION_ARGS \
             $SUBTITLE_ARGS \
