@@ -119,6 +119,20 @@ jobs:
           sudo cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/
           ffprobe -version | head -1
 
+      - name: Cache Deno
+        id: cache-deno
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/deno
+          key: deno-2.x
+
+      - name: Install Deno
+        if: steps.cache-deno.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          sudo cp "$HOME/.deno/bin/deno" /usr/local/bin/deno
+          deno --version
+
       - name: Install apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
@@ -172,6 +186,7 @@ jobs:
 
           spotdl download \
             "${{ github.event.inputs.spotify_url }}" \
+            --download-deno \
             --client-id "${{ secrets.SPOTIFY_CLIENT_ID }}" \
             --client-secret "${{ secrets.SPOTIFY_CLIENT_SECRET }}" \
             --format "${{ github.event.inputs.output_format }}" \
