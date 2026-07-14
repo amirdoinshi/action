@@ -193,7 +193,7 @@ jobs:
                   if line.startswith('http'):
                       links.append(line)
                   else:
-                      if 't.me/' in line:
+                      if 't.me/' in line or 'telegram.me/' in line:
                           links.append('https://' + line.lstrip('/'))
               seen = set()
               unique_links = []

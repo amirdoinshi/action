@@ -23,6 +23,8 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 # Configuration
 # ============================================================================
 
+TELEGRAM_BASE_URL = os.environ.get("TELEGRAM_BASE_URL", "https://telegram.me").rstrip("/")
+
 CHANNELS         = [u.strip() for u in os.environ.get("INPUT_CHANNELS", "").split(",") if u.strip()]
 RUN_ID           = os.environ.get("INPUT_RUN_ID", "unknown")
 HISTORY_JSON     = os.environ.get("INPUT_HISTORY", "{}")
@@ -31,6 +33,12 @@ AVATAR_CHANNELS  = set(u.strip().rstrip("/") for u in os.environ.get("INPUT_AVAT
 
 # Tehran timezone — UTC+3:30, no DST (Iran stopped DST permanently in 2022).
 # Must be timedelta, NOT timezone(), so we can add it to a datetime.
+# Rewrite t.me URLs to configured base domain (t.me has been unreliable)
+CHANNELS = [
+    url.replace("https://t.me", TELEGRAM_BASE_URL) if url.startswith("https://t.me") else url
+    for url in CHANNELS
+]
+
 TEHRAN_OFFSET = timedelta(hours=3, minutes=30)
 
 MAX_WORKERS         = 2
