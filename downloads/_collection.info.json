@@ -1,0 +1,4 @@
+{
+  "type": "unknown",
+  "error": "http status: 403, code: -1 - https://api.spotify.com/v1/playlists/37i9dQZEVXcPTUTsnkJ1eX?additional_types=track:\n Active premium subscription required for the owner of the app. When the subscription status changes, it can take a few hours before requests are allowed again., reason: None"
+}
