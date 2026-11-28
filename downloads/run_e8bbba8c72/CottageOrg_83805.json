@@ -1,0 +1,39 @@
+{
+  "message_id": "83805",
+  "channel": "CottageOrg",
+  "channel_url": "https://telegram.me/s/CottageOrg",
+  "content": "🔴 عکس‌های جدیدی که سلنا گومز از خودش پست کرده   \n[@MovieCottage](https://t.me/MovieCottage)",
+  "timestamp": "22:57",
+  "photo_url": "https://cdn4.telesco.pe/file/UihUzkJJZFD-wvtjHM9R5ByqvnxAxhhMPzgaOhVeIecH5rh28gfociFa-uwyV1xWV6QHLN7HWyWVmwS5Od26DqVXfTNQfVZgKikSnAWUMP8l13QTt4rA0WVh5QdhqLgB-coYfEt8yXor6M2AgCvXOFh_HDclyllFAKjrq2NpJKm1fzpk-jhE1ocNGQuwx6Ak5QVegv89n4a-udqHk2HHcn73qU2bKOTcJqpI0bN3yKht7voFM5lzy4wnj0OQhyiTNNNUeTfmZg-Sp3OJ_svJuq69N00fugCZKelSRuCyrUduANIpBfPxuKNnz4y7S3J2aI6-7ccZaBRFQIu7W-CFgg.jpg",
+  "photo_count": 4,
+  "video_url": null,
+  "video_thumb_url": null,
+  "audio_url": null,
+  "document_url": null,
+  "document_filename": null,
+  "document_description": null,
+  "telegram_post_link": "https://t.me/CottageOrg/83805?single",
+  "downloaded_media": [
+    {
+      "type": "photo",
+      "filename": "CottageOrg_83805_photo_0.jpg",
+      "size": 107867
+    },
+    {
+      "type": "photo",
+      "filename": "CottageOrg_83805_photo_1.jpg",
+      "size": 123557
+    },
+    {
+      "type": "photo",
+      "filename": "CottageOrg_83805_photo_2.jpg",
+      "size": 88707
+    },
+    {
+      "type": "photo",
+      "filename": "CottageOrg_83805_photo_3.jpg",
+      "size": 94935
+    }
+  ],
+  "fetched_at": "2026-11-28T19:29:00Z"
+}
